@@ -73,7 +73,7 @@ def smile_to_graph(smile):
     从 SMILES 构建一个包含原子和 Motif 节点的图。
     - 节点特征包含类型标识符 (原子=0, Motif=1)
     - Motif 特征为其8维药效团 multi-hot 编码
-    - 包含原子-原子, 原子-Motif, Motif-Motif 三类边
+    - 包含原子-原子, 原子-Motif两类边
     """
     try:
         mol = Chem.MolFromSmiles(smile)
@@ -147,8 +147,8 @@ def smile_to_graph(smile):
     # 合并所有节点特征
     x = np.concatenate([x_atoms_final, x_motifs_final], axis=0)
 
-    # 5. --- 构建三类边 ---
-    # a. 原子-Motif 边
+    # 5. --- 构建边 ---
+    # 原子-Motif 边
     atom_motif_edges = []
     for k, motif in enumerate(cliques):
         motif_node_idx = num_atoms + k
