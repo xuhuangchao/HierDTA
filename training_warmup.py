@@ -27,7 +27,28 @@ parser.add_argument('--suffix', type=str, default='hmol_motif', help='create_dat
 
 parser.add_argument('--epoch', type=int, default=500, help='Epoches to use')  # 默认500
 parser.add_argument('--patience', type=int, default=50, help='Patience to use')
-parser.add_argument('--surface_k', type=int, default=5, help='k for surface-to-residue mapping (must match preprocessing)')  
+parser.add_argument('--surface_k', type=int, default=5, help='k for surface-to-residue mapping (must match preprocessing)')
+
+# Drug architecture
+parser.add_argument('--drug_hidden', type=int, default=64, help='Drug GAT hidden channels')
+parser.add_argument('--drug_out', type=int, default=128, help='Drug GAT output channels (must equal emb_dim)')
+parser.add_argument('--n_layers_drug', type=int, default=2, help='Drug GAT num layers')
+parser.add_argument('--heads', type=int, default=2, help='Drug GAT attention heads')
+parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate for drug GAT and interaction')
+
+# Protein architecture
+parser.add_argument('--protein_hidden', type=int, default=128, help='Protein EGNN hidden dim')
+parser.add_argument('--protein_out', type=int, default=128, help='Protein EGNN output dim (must equal emb_dim)')
+parser.add_argument('--n_layers_protein', type=int, default=4, help='Protein EGNN num layers')
+parser.add_argument('--use_surface', type=int, default=1, help='Use surface features (1=True, 0=False)')
+
+# Interaction & ablation
+parser.add_argument('--emb_dim', type=int, default=128, help='Interaction embedding dim')
+parser.add_argument('--use_fingerprint', type=int, default=1, help='Use fingerprint branch (1=True, 0=False)')
+parser.add_argument('--use_p_global', type=int, default=1, help='Use global ESM protein branch (1=True, 0=False)')
+parser.add_argument('--use_a2p_attn', type=int, default=1, help='Use atom->protein cross-attention (1=True, 0=False)')
+parser.add_argument('--use_m2p_attn', type=int, default=1, help='Use motif->protein cross-attention (1=True, 0=False)')
+parser.add_argument('--use_protein_max_pool', type=int, default=1, help='Use protein max-pool augmentation (1=True, 0=False)')
 
 args = parser.parse_args()
 
@@ -134,6 +155,13 @@ print('Epochs: ', NUM_EPOCHS)
 print('Batch size: ', TRAIN_BATCH_SIZE)
 print('patience: ', EARLY_STOPPING_PATIENCE)
 print('max norm: ', max_norm)
+print('Drug  : drug_hidden={}, drug_out={}, n_layers={}, heads={}, dropout={}'.format(
+    args.drug_hidden, args.drug_out, args.n_layers_drug, args.heads, args.dropout))
+print('Protein: protein_hidden={}, protein_out={}, n_layers={}, use_surface={}'.format(
+    args.protein_hidden, args.protein_out, args.n_layers_protein, bool(args.use_surface)))
+print('Interaction: emb_dim={}, dropout={}, fp={}, p_global={}, a2p={}, m2p={}, max_pool={}'.format(
+    args.emb_dim, args.dropout, bool(args.use_fingerprint), bool(args.use_p_global),
+    bool(args.use_a2p_attn), bool(args.use_m2p_attn), bool(args.use_protein_max_pool)))
 
 name = f"runseed_seed"
 
@@ -196,7 +224,23 @@ for dataset in datasets:
 
         # training the model
         device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
-        model = modeling().to(device)
+        model = modeling(
+            drug_hidden=args.drug_hidden,
+            drug_out=args.drug_out,
+            n_layers_drug=args.n_layers_drug,
+            heads=args.heads,
+            dropout=args.dropout,
+            protein_hidden=args.protein_hidden,
+            protein_out=args.protein_out,
+            n_layers_protein=args.n_layers_protein,
+            use_surface=bool(args.use_surface),
+            emb_dim=args.emb_dim,
+            use_fingerprint=bool(args.use_fingerprint),
+            use_p_global=bool(args.use_p_global),
+            use_a2p_attn=bool(args.use_a2p_attn),
+            use_m2p_attn=bool(args.use_m2p_attn),
+            use_protein_max_pool=bool(args.use_protein_max_pool)
+        ).to(device)
         loss_fn = nn.MSELoss()
         optimizer = AdamW(model.parameters(), lr=LR, weight_decay=1e-4)  
         warmup_scheduler = LinearLR(optimizer, start_factor=1e-6, end_factor=1.0, total_iters=WARMUP_EPOCHS)

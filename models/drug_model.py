@@ -5,9 +5,8 @@ from torch_geometric.nn import GATv2Conv
 from torch_geometric.data import Batch
 
 # 全局变量定义
-num_bond_type = 8     # 覆盖 0-7，给未来扩展留空间
-num_bond_inring = 4   # 覆盖 0-3
-num_node_type = 2    
+num_node_type = 2
+EDGE_DIM = 14  # chemprop bond features dim
 
 class DrugMotifGAT(nn.Module):
     def __init__(self, in_channels=133, hidden_channels=64, out_channels=128, num_layers=2, heads=2, dropout=0.2):
@@ -21,26 +20,23 @@ class DrugMotifGAT(nn.Module):
         self.node_type_embedding = nn.Embedding(num_node_type, hidden_channels)
 
         # --- 2. 统一的GNN网络 (GATv2) ---
-        self.edge_embedding1 = nn.Embedding(num_bond_type, hidden_channels)
-        self.edge_embedding2 = nn.Embedding(num_bond_inring, hidden_channels)
-
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
         self.skips = nn.ModuleList()
 
         # 输入层 (输入维度现在是统一后的 hidden_channels)
-        self.convs.append(GATv2Conv(hidden_channels, hidden_channels, heads=heads, edge_dim=hidden_channels))
+        self.convs.append(GATv2Conv(hidden_channels, hidden_channels, heads=heads, edge_dim=EDGE_DIM))
         self.norms.append(nn.BatchNorm1d(hidden_channels * heads))
         self.skips.append(nn.Linear(hidden_channels, hidden_channels * heads))
 
         # 中间隐藏层
         for _ in range(num_layers - 2):
-            self.convs.append(GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads, edge_dim=hidden_channels))
+            self.convs.append(GATv2Conv(hidden_channels * heads, hidden_channels, heads=heads, edge_dim=EDGE_DIM))
             self.norms.append(nn.BatchNorm1d(hidden_channels * heads))
             self.skips.append(nn.Linear(hidden_channels * heads, hidden_channels * heads))
 
         # GAT输出层
-        self.convs.append(GATv2Conv(hidden_channels * heads, out_channels, heads=1, concat=False, edge_dim=hidden_channels))
+        self.convs.append(GATv2Conv(hidden_channels * heads, out_channels, heads=1, concat=False, edge_dim=EDGE_DIM))
         self.norms.append(nn.BatchNorm1d(out_channels))
         self.skips.append(nn.Linear(hidden_channels * heads, out_channels))
         
@@ -67,15 +63,15 @@ class DrugMotifGAT(nn.Module):
         type_embeddings = self.node_type_embedding(node_types)
         x_embedded = x_embedded + type_embeddings
 
-        # --- 2. 准备统一的边特征 ---
-        edge_attr_embedded = self.edge_embedding1(edge_attr[:, 0].long()) + self.edge_embedding2(edge_attr[:, 1].long())
-        
+        # --- 2. 边特征直接使用 chemprop 14维特征 (无需 embedding) ---
+        edge_attr_float = edge_attr.float()
+
         # --- 3. 在完整图上执行统一的消息传递 ---
         x = x_embedded
         for i in range(self.num_layers):
             x_res = self.skips[i](x)
             # GATv2卷积作用于所有节点和所有边
-            x = self.convs[i](x, edge_index, edge_attr=edge_attr_embedded)
+            x = self.convs[i](x, edge_index, edge_attr=edge_attr_float)
             x = self.norms[i](x)
             x = F.elu(x)
             x = F.dropout(x, p=self.dropout, training=self.training)

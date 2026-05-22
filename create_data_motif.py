@@ -54,6 +54,27 @@ def atom_features(atom):
            [atom.GetMass() * 0.01]
     return features
 
+# ===== Chemprop Standard Bond Features (14-dim) =====
+BOND_FDIM = 14
+
+def bond_features(bond):
+    """chemprop 标准 14维键特征"""
+    if bond is None:
+        fbond = [1] + [0] * (BOND_FDIM - 1)
+    else:
+        bt = bond.GetBondType()
+        fbond = [
+            0,  # bond is not None
+            bt == Chem.rdchem.BondType.SINGLE,
+            bt == Chem.rdchem.BondType.DOUBLE,
+            bt == Chem.rdchem.BondType.TRIPLE,
+            bt == Chem.rdchem.BondType.AROMATIC,
+            (bond.GetIsConjugated() if bt is not None else 0),
+            (bond.IsInRing() if bt is not None else 0)
+        ]
+        fbond += onek_encoding_unk_chemprop(int(bond.GetStereo()), list(range(6)))
+    return fbond
+
 # ===== Functional Group Knowledge Embedding =====
 fg2emb = pickle.load(open('initial/fg2emb.pkl', 'rb'))
 
@@ -73,45 +94,12 @@ def match_fg_for_motif(submol):
             matched_embs.append(fg2emb[name])
     return matched_embs
 
-# allowable node and edge features
-allowable_features = {
-    'possible_atomic_num_list': list(range(1, 119)),  #元素周期表序号
-    'possible_formal_charge_list': [-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5],
-    'possible_chirality_list': [
-        Chem.rdchem.ChiralType.CHI_UNSPECIFIED,
-        Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CW,
-        Chem.rdchem.ChiralType.CHI_TETRAHEDRAL_CCW,
-        Chem.rdchem.ChiralType.CHI_OTHER
-    ],    #原子的手性
-    'possible_hybridization_list': [
-        Chem.rdchem.HybridizationType.S,
-        Chem.rdchem.HybridizationType.SP, Chem.rdchem.HybridizationType.SP2,
-        Chem.rdchem.HybridizationType.SP3, Chem.rdchem.HybridizationType.SP3D,
-        Chem.rdchem.HybridizationType.SP3D2, Chem.rdchem.HybridizationType.UNSPECIFIED
-    ],
-    'possible_numH_list': [0, 1, 2, 3, 4, 5, 6, 7, 8],
-    'possible_implicit_valence_list': [0, 1, 2, 3, 4, 5, 6],
-    'possible_degree_list': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-    'possible_bonds': [
-        Chem.rdchem.BondType.SINGLE,
-        Chem.rdchem.BondType.DOUBLE,
-        Chem.rdchem.BondType.TRIPLE,
-        Chem.rdchem.BondType.AROMATIC
-    ],
-    # 'possible_bond_dirs': [  # only for double bond stereo information
-    #     Chem.rdchem.BondDir.NONE,
-    #     Chem.rdchem.BondDir.ENDUPRIGHT,
-    #     Chem.rdchem.BondDir.ENDDOWNRIGHT
-    # ],
-    'possible_bond_inring': [None, False, True]
-}
-
 def smile_to_graph(smile):
     """
     从 SMILES 构建一个包含原子和 Motif 节点的图。
     - 节点特征包含类型标识符 (原子=0, Motif=1)
     - 原子特征为 chemprop 标准 134维特征
-    - Motif 特征为 133维 fg2emb 官能团嵌入聚合
+    - Motif 特征为 133维原子特征均值和fg2emb 官能团嵌入聚合
     - 包含原子-原子, 原子-Motif两类边
     """
     try:
@@ -132,10 +120,7 @@ def smile_to_graph(smile):
     atom_atom_edge_features = []
     for bond in mol.GetBonds():
         u, v = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-        edge_feature = [
-            allowable_features['possible_bonds'].index(bond.GetBondType()),
-            allowable_features['possible_bond_inring'].index(bond.IsInRing())
-        ]
+        edge_feature = bond_features(bond)
         atom_atom_edges.extend([[u, v], [v, u]])
         atom_atom_edge_features.extend([edge_feature, edge_feature])
 
@@ -148,15 +133,24 @@ def smile_to_graph(smile):
         cliques = [list(range(num_atoms))]
         num_motifs = 1
 
-    # 3. --- Motif 节点特征计算 (133维 fg2emb 聚合) ---
+    # 3. --- Motif 节点特征计算 (133维: 原子特征均值 + fg2emb) ---
     motif_features_list = []
     for clique in cliques:
         submol = get_clique_mol(mol, clique)
         matched_embs = match_fg_for_motif(submol)
+
+        # 基础特征: 组成原子的 chemprop 特征均值 (保底机制)
+        atom_feats_in_motif = np.array([atom_features_list[idx] for idx in clique], dtype=np.float32)
+        base_feat = np.mean(atom_feats_in_motif, axis=0)  # [133]
+
+        # 知识增强: fg2emb 官能团嵌入 (可能为空)
         if len(matched_embs) > 0:
-            feature_vec = np.mean(matched_embs, axis=0).astype(np.float32)
+            fg_feat = np.mean(matched_embs, axis=0).astype(np.float32)
         else:
-            feature_vec = np.zeros(133, dtype=np.float32)
+            fg_feat = np.zeros(133, dtype=np.float32)
+
+        # 融合: element-wise add，保持 133-dim
+        feature_vec = base_feat + fg_feat
         motif_features_list.append(feature_vec)
 
     x_motifs = np.array(motif_features_list, dtype=np.float32)  # [N_motifs, 133]
@@ -183,10 +177,13 @@ def smile_to_graph(smile):
         np.array(atom_atom_edges).T if atom_atom_edges else np.empty((2, 0)),
         np.array(atom_motif_edges).T if atom_motif_edges else np.empty((2, 0))
     ], axis=1)
-
-    atom_motif_edge_attr = np.array([[5, 0]] * len(atom_motif_edges), dtype=np.float32)
+    
+#     0：真实化学键
+#   - 1：空键（chemprop null）
+#   - 2：原子–Motif 结构隶属边
+    atom_motif_edge_attr = np.array([[2] + [0] * (BOND_FDIM - 1)] * len(atom_motif_edges), dtype=np.float32)
     edge_attr = np.concatenate([
-        np.array(atom_atom_edge_features) if atom_atom_edge_features else np.empty((0, 2)),
+        np.array(atom_atom_edge_features) if atom_atom_edge_features else np.empty((0, BOND_FDIM)),
         atom_motif_edge_attr,
     ], axis=0)
 

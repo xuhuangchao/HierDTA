@@ -218,11 +218,7 @@ results_{dataset}/{strategy}/seed_{seed}/
 
 The nearest-neighbor parameter `k` for mapping dMaSIF surface points to residues is fully configurable (`3, 5, 8`, etc.). Each `k` produces an isolated cache (`protein_graphs_k{k}.pt`), so multiple experiments can coexist without collision.
 
-### Explicit GPU Control for ESM Inference
-
-Both `protein_process.py` and `create_data_motif.py` accept `--gpu_idx`, so ESM-2 inference can be directed to a specific GPU (e.g., `cuda:1`) rather than defaulting to `cuda:0`.
-
-### Consolidated Preprocessing Paths
+### Preprocessing Paths
 
 All protein preprocessing outputs are organized under a single directory:
 
@@ -245,7 +241,7 @@ data/{dataset}/preprocessed/
 |                 | `num_layers`      | 2           |
 |                 | `heads`           | 2           |
 |                 | `dropout`         | 0.2         |
-| ProteinEGNN     | `num_features_xt` | 649         |
+| ProteinEGNN     | `num_features_xt` | 608         |
 |                 | `hidden_nf`       | 128         |
 |                 | `output_dim`      | 128         |
 |                 | `n_layers`        | 4           |
