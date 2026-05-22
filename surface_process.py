@@ -15,41 +15,44 @@ from rdkit import Chem
 import MDAnalysis as mda
 import yaml
 import re
+import argparse
 
 # 导入dMaSIF相关模块
 from dmasif_encoder.protein_surface_encoder import dMaSIF
 from dmasif_encoder.geometry_processing import atoms_to_points_normals
 
 class ProteinSurfacePreprocessor:
-    def __init__(self, dataset_name):
+    def __init__(self, dataset_name, k=5):
         self.dataset_name = dataset_name
         self.fpath = f'data/{dataset_name}/'
         self.pocket_dir = f'{self.fpath}pocket1_{dataset_name}'
-        
+        self.k = k
+
         # 设置随机种子
         seed = 42
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed)
-        
+
         # 加载配置和模型
         self.device = "cpu"
         with open("config.yml", 'r') as f:
             config = EasyDict(yaml.safe_load(f))
         self.net = dMaSIF(config.model.dmasif).to(self.device)
         self.net.eval()
-        
+
         # 元素到数字的映射
-        self.ele2num = {'H':0, 'LI':1, 'C':2, 'N':3, 'O':4, 'NA':5, 'MG':6, 'P':7, 'S':8, 
-                       'K':9, 'CA':10, 'MN':11, 'FE':12, 'CO':13, 'NI':14, 'CU':15, 'ZN':16, 
+        self.ele2num = {'H':0, 'LI':1, 'C':2, 'N':3, 'O':4, 'NA':5, 'MG':6, 'P':7, 'S':8,
+                       'K':9, 'CA':10, 'MN':11, 'FE':12, 'CO':13, 'NI':14, 'CU':15, 'ZN':16,
                        'SE':17, 'SR':18, 'CD':19, 'CS':20, 'HG':21}
-        
+
         # 加载蛋白质数据
         self.proteins = json.load(open(self.fpath + "proteins.txt"), object_pairs_hook=OrderedDict)
         self.all_keys = list(self.proteins.keys())
-        
-        # 创建输出目录
-        self.surface_dir = f'{self.fpath}point_embeddings'
-        self.map_dir = f'{self.fpath}residue_surface_feat'
+
+        # 创建输出目录（整合到 preprocessed 下）
+        self.preprocessed_dir = f'{self.fpath}preprocessed'
+        self.surface_dir = f'{self.preprocessed_dir}/surface_points'
+        self.map_dir = f'{self.preprocessed_dir}/residue_surface/k{k}'
         os.makedirs(self.surface_dir, exist_ok=True)
         os.makedirs(self.map_dir, exist_ok=True)
 
@@ -177,7 +180,7 @@ class ProteinSurfacePreprocessor:
         print(residue_coords.shape)
         return residue_coords
 
-    def map_surface_to_residues(self, surface_pt_file, residue_coords, k=5):
+    def map_surface_to_residues(self, surface_pt_file, residue_coords):
         """将表面特征映射到残基"""
         surface_data = torch.load(surface_pt_file, map_location="cpu")
         surface_xyz = surface_data["xyz"].numpy()         # [512, 3]
@@ -185,7 +188,7 @@ class ProteinSurfacePreprocessor:
 
         # 构建 KDTree 查找最近 surface 点
         surface_tree = KDTree(surface_xyz)
-        distances, indices = surface_tree.query(residue_coords, k=k)   # (N_res, k)
+        distances, indices = surface_tree.query(residue_coords, k=self.k)   # (N_res, k)
 
         # 收集最近 surface 的特征
         selected_feat = surface_feat[indices]  # (N_residues, k, 128) 
@@ -263,6 +266,9 @@ class ProteinSurfacePreprocessor:
                 traceback.print_exc()
 
 if __name__ == "__main__":
-    # preprocessor = ProteinSurfacePreprocessor('kiba')
-    preprocessor = ProteinSurfacePreprocessor('2hyy')
+    parser = argparse.ArgumentParser(description='Preprocess protein surface features')
+    parser.add_argument('--dataset', type=str, default='2hyy', help='Dataset name to process')
+    parser.add_argument('--k', type=int, default=5, help='Number of nearest surface points for residue mapping')
+    args = parser.parse_args()
+    preprocessor = ProteinSurfacePreprocessor(args.dataset, k=args.k)
     preprocessor.run_pipeline()

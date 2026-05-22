@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.optim import RAdam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, LinearLR
-from models.UniMolDTA import DualDTA
+from models.model import HierDTA
 from utils import TestbedDatasetHMol, rmse_gpu, mse_gpu, ci_gpu, pearson_gpu, get_rm2_gpu
 from torch_geometric.loader import DataLoader
 import torch.nn.functional as F
@@ -16,17 +16,18 @@ import argparse
 # 添加命令行参数解析
 parser = argparse.ArgumentParser(description='Train DTA models with different seeds')
 parser.add_argument('--dataset_idx', type=int, default=0, help='Dataset index: 0 for davis, 1 for kiba')
-parser.add_argument('--model_idx', type=int, default=0, help='0-DualDTA')
+parser.add_argument('--model_idx', type=int, default=0, help='0-')
 parser.add_argument('--gpu_idx', type=int, default=0, help='GPU index to use')
 parser.add_argument('--strategy', type=str, default='random', help='Data split strategy')
 parser.add_argument('--seed', type=int, default=None, help='Specific seed to use')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate to use')
 parser.add_argument('--batch_size', type=int, default=512, help='Batch size to use')
-parser.add_argument('--max_norm', type=float, default=1.0, help='max norm in clip to use') 
+parser.add_argument('--max_norm', type=float, default=1.0, help='max norm in clip to use') # random split:max_norm=5.0 clod split:max_norm=1.0 
 parser.add_argument('--suffix', type=str, default='hmol_motif', help='create_data file')
 
 parser.add_argument('--epoch', type=int, default=500, help='Epoches to use')  # 默认500
-parser.add_argument('--patience', type=int, default=50, help='Patience to use')  
+parser.add_argument('--patience', type=int, default=50, help='Patience to use')
+parser.add_argument('--surface_k', type=int, default=5, help='k for surface-to-residue mapping (must match preprocessing)')  
 
 args = parser.parse_args()
 
@@ -102,11 +103,11 @@ def setup_seed(seed):
     
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-    torch.set_default_dtype(torch.float32)
+    torch.set_default_dtype(torch.float32) 
         
         
 datasets = [['davis','kiba'][args.dataset_idx]]  
-modeling = [DualDTA][args.model_idx]
+modeling = [HierDTA][args.model_idx]
 model_st = modeling.__name__
 
 cuda_name = f"cuda:{args.gpu_idx}"
@@ -134,7 +135,7 @@ print('Batch size: ', TRAIN_BATCH_SIZE)
 print('patience: ', EARLY_STOPPING_PATIENCE)
 print('max norm: ', max_norm)
 
-name = f"pegnn_warmup_epoch{NUM_EPOCHS}_pat{EARLY_STOPPING_PATIENCE}_norm{max_norm}_2"
+name = f"runseed_seed"
 
 # Main program: iterate over different seeds and datasets
 for dataset in datasets:
@@ -146,105 +147,126 @@ for dataset in datasets:
 
         # 构建路径
         processed_data_dir = f'data/processed/{strategy}/seed_{seed}'
-        dataset_prefix = dataset  
-        
-        processed_data_file_train = f'{processed_data_dir}/processed/{dataset_prefix}_train_{suffix}.pt'
-        processed_data_file_val = f'{processed_data_dir}/processed/{dataset_prefix}_val_{suffix}.pt'
-        processed_data_file_test = f'{processed_data_dir}/processed/{dataset_prefix}_test_{suffix}.pt'
-        
-        if (not os.path.isfile(processed_data_file_train)) or (not os.path.isfile(processed_data_file_val)) or (not os.path.isfile(processed_data_file_test)):
-            print(f'Data files not found for seed {seed}. Please run create_data.py first!')
+        dataset_prefix = dataset
+        split_dir = f'split_data/seed_{seed}/{strategy}'
+
+        # 检查 split CSV 是否存在
+        if not os.path.isfile(f'{split_dir}/{dataset_prefix}_train.csv'):
+            print(f'Split CSV not found for seed {seed}, strategy {strategy}. Please run split_all_dataset.py first!')
             continue
-        else:
-            train_data = TestbedDatasetHMol(root=processed_data_dir, dataset=f'{dataset_prefix}_train_{suffix}')
-            val_data = TestbedDatasetHMol(root=processed_data_dir, dataset=f'{dataset_prefix}_val_{suffix}') 
-            test_data = TestbedDatasetHMol(root=processed_data_dir, dataset=f'{dataset_prefix}_test_{suffix}')
-            
-            g = torch.Generator()
-            g.manual_seed(seed)
-            
-            # make data PyTorch mini-batch processing ready
-            train_loader = DataLoader(train_data, batch_size=TRAIN_BATCH_SIZE, shuffle=True, 
-                                      worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id), generator=g)
-            val_loader = DataLoader(val_data, batch_size=TEST_BATCH_SIZE, shuffle=False, generator=g)
-            test_loader = DataLoader(test_data, batch_size=TEST_BATCH_SIZE, shuffle=False, generator=g)
 
-            # 创建结果保存目录
-            os.makedirs(f'results_0924_{dataset}/{strategy}/seed_{seed}', exist_ok=True)
+        # 从 CSV 读取数据，TestbedDatasetHMol 会自动从 cache 组装 .pt 文件（惰性生成）
+        df_train = pd.read_csv(f'{split_dir}/{dataset_prefix}_train.csv')
+        train_drugs, train_prots, train_Y = list(df_train['Drug']), list(df_train['target_key']), list(df_train['Y'])
 
-            # training the model
-            device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
-            model = modeling().to(device)
-            loss_fn = nn.MSELoss()
-            optimizer = AdamW(model.parameters(), lr=LR, weight_decay=1e-4)  
-            warmup_scheduler = LinearLR(optimizer, start_factor=1e-6, end_factor=1.0, total_iters=WARMUP_EPOCHS)
-            main_scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS - WARMUP_EPOCHS, eta_min=1e-6)
-            scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[WARMUP_EPOCHS])
+        df_val = pd.read_csv(f'{split_dir}/{dataset_prefix}_val.csv')
+        val_drugs, val_prots, val_Y = list(df_val['Drug']), list(df_val['target_key']), list(df_val['Y'])
 
-            all_metrics = []
-            best_mse = 1000
-            best_ci = 0
-            best_epoch = -1
-            result_file_name = f'results_0924_{dataset}/{strategy}/seed_{seed}/result_{model_st}_{name}.csv'
-            checkpoint_file_name = f'results_0924_{dataset}/{strategy}/seed_{seed}/ckpt_{model_st}_{name}.pt'
+        df_test = pd.read_csv(f'{split_dir}/{dataset_prefix}_test.csv')
+        test_drugs, test_prots, test_Y = list(df_test['Drug']), list(df_test['target_key']), list(df_test['Y'])
 
-            for epoch in range(NUM_EPOCHS):
-                avg_loss = train(model, device, train_loader, optimizer, epoch+1, max_norm)
-            
-                G_val, P_val = predicting_gpu(model, device, val_loader)
-                val_ret = compute_metrics_gpu(G_val, P_val)
-              
-                # 使用验证集MSE决定最佳模型
-                if val_ret[1] < best_mse:   
-                    G_test, P_test, test_attention_records = predicting_gpu(model, device, test_loader, return_attention=True)
-                    test_ret = compute_metrics_gpu(G_test, P_test)
-             
-                    # 保存完整的检查点
-                    checkpoint = {
-                        'epoch': epoch + 1,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'scheduler_state_dict': scheduler.state_dict(),
-                        'best_mse': best_mse,
-                        'best_ci': best_ci,
-                        'val_metrics': val_ret,
-                        'test_metrics': test_ret
-                    }
-                    
-                    # 保存完整检查点
-                    torch.save(checkpoint, checkpoint_file_name)
-                    
-                    # 保存最佳测试集结果
-                    with open(result_file_name,'w') as f:
-                        f.write(','.join(map(str, test_ret)))
-                    
-                    # 保存测试集预测结果和attention记录
-                    test_analysis_data = {
-                        'G_test': G_test,
-                        'P_test': P_test, 
-                        'attention_records': test_attention_records,
-                        'test_metrics': test_ret,
-                        'epoch': epoch + 1
-                    }
-                    attention_file_name = checkpoint_file_name.replace('.pt', '_test_analysis.pt')
-                    torch.save(test_analysis_data, attention_file_name)
-                    
-                    best_epoch = epoch+1
-                    best_mse = val_ret[1]
-                    best_ci = val_ret[3]
-                    best_rm2 = val_ret[4]
-                    print(f'Val MSE improved at epoch {best_epoch}; best_mse:{best_mse}, best_ci:{best_ci}, best_rm2:{best_rm2}')
-                    print(f'Corresponding test metrics - RMSE:{test_ret[0]}, MSE:{test_ret[1]}, Pearson:{test_ret[2]}, CI:{test_ret[3]}, RM2:{test_ret[4]}')
-                    print(f'Saved checkpoint to {checkpoint_file_name}')
+        train_data = TestbedDatasetHMol(
+            root=processed_data_dir, dataset=f'{dataset_prefix}_train_{suffix}',
+            dataset_name=dataset, xd=train_drugs, xt=train_prots, y=train_Y,
+            surface_k=args.surface_k
+        )
+        val_data = TestbedDatasetHMol(
+            root=processed_data_dir, dataset=f'{dataset_prefix}_val_{suffix}',
+            dataset_name=dataset, xd=val_drugs, xt=val_prots, y=val_Y,
+            surface_k=args.surface_k
+        )
+        test_data = TestbedDatasetHMol(
+            root=processed_data_dir, dataset=f'{dataset_prefix}_test_{suffix}',
+            dataset_name=dataset, xd=test_drugs, xt=test_prots, y=test_Y,
+            surface_k=args.surface_k
+        )
 
-                else:
-                    print(f'Val MSE: {val_ret[1]} - No improvement since epoch {best_epoch}; best_mse:{best_mse}, best_ci:{best_ci}, best_rm2:{best_rm2}')
+        g = torch.Generator()
+        g.manual_seed(seed)
+
+        # make data PyTorch mini-batch processing ready
+        train_loader = DataLoader(train_data, batch_size=TRAIN_BATCH_SIZE, shuffle=True,
+                                  worker_init_fn=lambda worker_id: np.random.seed(seed + worker_id), generator=g)
+        val_loader = DataLoader(val_data, batch_size=TEST_BATCH_SIZE, shuffle=False, generator=g)
+        test_loader = DataLoader(test_data, batch_size=TEST_BATCH_SIZE, shuffle=False, generator=g)
+
+
+        # 创建结果保存目录
+        os.makedirs(f'results_{dataset}/{strategy}/seed_{seed}', exist_ok=True)
+
+        # training the model
+        device = torch.device(cuda_name if torch.cuda.is_available() else "cpu")
+        model = modeling().to(device)
+        loss_fn = nn.MSELoss()
+        optimizer = AdamW(model.parameters(), lr=LR, weight_decay=1e-4)  
+        warmup_scheduler = LinearLR(optimizer, start_factor=1e-6, end_factor=1.0, total_iters=WARMUP_EPOCHS)
+        main_scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS - WARMUP_EPOCHS, eta_min=1e-6)
+        scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[WARMUP_EPOCHS])
+
+        all_metrics = []
+        best_mse = 1000
+        best_ci = 0
+        best_epoch = -1
+        result_file_name = f'results_{dataset}/{strategy}/seed_{seed}/result_{model_st}_{name}.csv'
+        checkpoint_file_name = f'results_{dataset}/{strategy}/seed_{seed}/ckpt_{model_st}_{name}.pt'
+
+        for epoch in range(NUM_EPOCHS):
+            avg_loss = train(model, device, train_loader, optimizer, epoch+1, max_norm)
+        
+            G_val, P_val = predicting_gpu(model, device, val_loader)
+            val_ret = compute_metrics_gpu(G_val, P_val)
+          
+            # 使用验证集MSE决定最佳模型
+            if val_ret[1] < best_mse:   
+                G_test, P_test, test_attention_records = predicting_gpu(model, device, test_loader, return_attention=True)
+                test_ret = compute_metrics_gpu(G_test, P_test)
+         
+                # 保存完整的检查点
+                checkpoint = {
+                    'epoch': epoch + 1,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'best_mse': best_mse,
+                    'best_ci': best_ci,
+                    'val_metrics': val_ret,
+                    'test_metrics': test_ret
+                }
                 
-                scheduler.step()
-                print(f"Epoch {epoch+1}, Current LR: {optimizer.param_groups[0]['lr']}")
-                # 早停策略 - 如果N个周期内没有改善，则停止训练
-                if epoch + 1 - best_epoch > EARLY_STOPPING_PATIENCE:
-                    print(f"Early stopping at epoch {epoch+1} as no improvement for patience")
-                    break
+                # 保存完整检查点
+                torch.save(checkpoint, checkpoint_file_name)
                 
-                                
+                # 保存最佳测试集结果
+                with open(result_file_name,'w') as f:
+                    f.write(','.join(map(str, test_ret)))
+                
+                # 保存测试集预测结果和attention记录
+                test_analysis_data = {
+                    'G_test': G_test,
+                    'P_test': P_test, 
+                    'attention_records': test_attention_records,
+                    'test_metrics': test_ret,
+                    'epoch': epoch + 1
+                }
+                attention_file_name = checkpoint_file_name.replace('.pt', '_test_analysis.pt')
+                torch.save(test_analysis_data, attention_file_name)
+                
+                best_epoch = epoch+1
+                best_mse = val_ret[1]
+                best_ci = val_ret[3]
+                best_rm2 = val_ret[4]
+                print(f'Val MSE improved at epoch {best_epoch}; best_mse:{best_mse}, best_ci:{best_ci}, best_rm2:{best_rm2}')
+                print(f'Corresponding test metrics - RMSE:{test_ret[0]}, MSE:{test_ret[1]}, Pearson:{test_ret[2]}, CI:{test_ret[3]}, RM2:{test_ret[4]}')
+                print(f'Saved checkpoint to {checkpoint_file_name}')
+
+            else:
+                print(f'Val MSE: {val_ret[1]} - No improvement since epoch {best_epoch}; best_mse:{best_mse}, best_ci:{best_ci}, best_rm2:{best_rm2}')
+            
+            scheduler.step()
+            print(f"Epoch {epoch+1}, Current LR: {optimizer.param_groups[0]['lr']}")
+            # 早停策略 - 如果N个周期内没有改善，则停止训练
+            if epoch + 1 - best_epoch > EARLY_STOPPING_PATIENCE:
+                print(f"Early stopping at epoch {epoch+1} as no improvement for patience")
+                break
+            
+                            

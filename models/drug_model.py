@@ -5,24 +5,24 @@ from torch_geometric.nn import GATv2Conv
 from torch_geometric.data import Batch
 
 # 全局变量定义
-num_bond_type = 6      
-num_bond_direction = 3  
+num_bond_type = 8     # 覆盖 0-7，给未来扩展留空间
+num_bond_inring = 4   # 覆盖 0-3
 num_node_type = 2    
 
 class DrugMotifGAT(nn.Module):
-    def __init__(self, in_channels=47, hidden_channels=64, out_channels=128, num_layers=2, heads=2, dropout=0.2):
+    def __init__(self, in_channels=133, hidden_channels=64, out_channels=128, num_layers=2, heads=2, dropout=0.2):
         super().__init__()
         self.num_layers = num_layers
         self.dropout = dropout
 
         # --- 1. 初始特征嵌入层 ---
         self.atom_feat_embedding = nn.Linear(in_channels, hidden_channels)
-        self.motif_feat_embedding = nn.Linear(8, hidden_channels)
+        self.motif_feat_embedding = nn.Linear(in_channels, hidden_channels)
         self.node_type_embedding = nn.Embedding(num_node_type, hidden_channels)
 
         # --- 2. 统一的GNN网络 (GATv2) ---
         self.edge_embedding1 = nn.Embedding(num_bond_type, hidden_channels)
-        self.edge_embedding2 = nn.Embedding(num_bond_direction, hidden_channels)
+        self.edge_embedding2 = nn.Embedding(num_bond_inring, hidden_channels)
 
         self.convs = nn.ModuleList()
         self.norms = nn.ModuleList()
@@ -54,16 +54,16 @@ class DrugMotifGAT(nn.Module):
             fingerprint = fingerprint.squeeze(1)
             
         # --- 1. 准备统一的初始节点特征 ---
-        node_types = x[:, 47].long()
+        node_types = x[:, 133].long()
         atom_mask = (node_types == 0)
         motif_mask = (node_types == 1)
-        
+
         # 创建一个空的特征矩阵
         x_embedded = torch.zeros(x.size(0), self.atom_feat_embedding.out_features, device=x.device)
-        
+
         # 分别填充原子和Motif的嵌入特征
-        x_embedded[atom_mask] = self.atom_feat_embedding(x[atom_mask, :47].float())
-        x_embedded[motif_mask] = self.motif_feat_embedding(x[motif_mask, :8].float())
+        x_embedded[atom_mask] = self.atom_feat_embedding(x[atom_mask, :133].float())
+        x_embedded[motif_mask] = self.motif_feat_embedding(x[motif_mask, :133].float())
         type_embeddings = self.node_type_embedding(node_types)
         x_embedded = x_embedded + type_embeddings
 

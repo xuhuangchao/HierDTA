@@ -2,191 +2,74 @@ import os
 import numpy as np
 from math import sqrt
 from scipy import stats
-from torch_geometric.data import InMemoryDataset
+from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
 from torch_geometric import data as DATA
 import torch
 
-class TestbedDataset3D(InMemoryDataset):
+class TestbedDatasetHMol(Dataset):
     def __init__(self, root='/tmp', dataset='davis',
-                 xd=None, xt=None, y=None, transform=None, pre_transform=None,
-                 smile_graph=None, pocket_graph=None, fingerprint=None,
-                 esm_feats=None): # Removed 'surfaces' parameter
+                 xd=None, xt=None, y=None, transform=None, pre_transform=None, pre_filter=None,
+                 smile_graph=None, pocket_graph=None, fingerprint=None, esm_feats=None,
+                 dataset_name=None, cache_dir='data/cache', surface_k=5):
 
         self.dataset = dataset
         self.xd = xd
         self.xt = xt
         self.y = y
         self.smile_graph = smile_graph
-        self.pocket_graph = pocket_graph # This will now be the point cloud data
+        self.pocket_graph = pocket_graph
         self.fingerprint = fingerprint
         self.esm_feats = esm_feats
+        self.dataset_name = dataset_name
+        self.cache_dir = cache_dir
+        self.surface_k = surface_k
+        self.transform = transform
+        self.pre_transform = pre_transform
+        self.pre_filter = pre_filter
 
-        super(TestbedDataset3D, self).__init__(root, transform, pre_transform)
-
-        if os.path.isfile(self.processed_paths[0]):
-            print('Pre-processed data found: {}, loading ...'.format(self.processed_paths[0]))
-            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
-        else:
-            print('Pre-processed data {} not found, doing pre-processing...'.format(self.processed_paths[0]))
-            self.process()
-            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
-
-    @property
-    def raw_file_names(self):
-        return []
-
-    @property
-    def processed_file_names(self):
-        return [self.dataset + '.pt']
-
-    def download(self):
-        pass
-
-    def _download(self):
-        pass
-
-    def _process(self):
-        if not os.path.exists(self.processed_dir):
-            os.makedirs(self.processed_dir)
-
-    def process(self):
         assert (self.xd is not None and self.xt is not None and self.y is not None), "The three lists must be the same length!"
-        data_list = []
+
+        # 如果未传入特征字典，从全局 cache 加载（与 seed/strategy 无关）
+        if self.smile_graph is None:
+            assert self.dataset_name is not None, "Must provide dataset_name when using cache mode"
+            cache_dir = self.cache_dir
+            print(f'Loading global caches from {cache_dir} for dataset {self.dataset_name} (surface_k={self.surface_k})...')
+            self.smile_graph = torch.load(f'{cache_dir}/{self.dataset_name}_smile_graph.pt', weights_only=False)
+            self.fingerprint = torch.load(f'{cache_dir}/{self.dataset_name}_fingerprint.pt', weights_only=False)
+            self.pocket_graph = torch.load(f'{cache_dir}/{self.dataset_name}_protein_graphs_k{self.surface_k}.pt', weights_only=False)
+            self.esm_feats = torch.load(f'{cache_dir}/{self.dataset_name}_esm_feats.pt', weights_only=False)
+            print('Cache loaded. Assembling data pairs...')
+
+        self.data_list = []
         data_len = len(self.xd)
 
         for i in range(data_len):
-            print('Converting data pair to graph: {}/{}'.format(i + 1, data_len))
+            if (i + 1) % 1000 == 0 or i == 0:
+                print('Converting data pair to graph: {}/{}'.format(i + 1, data_len))
             smiles = self.xd[i]
             key = self.xt[i]
             labels = self.y[i]
 
-            # Process drug data (3D molecular graph)
-            c_size, features, edge_index, bond_features, coordinates = self.smile_graph[smiles]
-            drug_graph = DATA.Data(
-                x=torch.Tensor(features),
-                edge_index=torch.LongTensor(edge_index).transpose(1, 0),
-                edge_attr=torch.FloatTensor(bond_features),
-                coordinates=torch.FloatTensor(coordinates)
-            )
-            drug_graph.c_size = torch.LongTensor([c_size])
-            drug_graph.smiles = smiles
-            drug_graph.fingerprint = torch.FloatTensor([self.fingerprint[smiles]])
-            
-            # Process protein data
-            pocket_data = self.pocket_graph[key]
-            
-            num_residues = torch.FloatTensor(pocket_data[0])
-            node_features = torch.Tensor(pocket_data[1])
-            edge_index_protein = torch.LongTensor(pocket_data[2])
-            residue_coords = torch.FloatTensor(pocket_data[3])
-            
-            # print(node_features, residue_coords)
-
-            protein_graph = DATA.Data(
-                x=node_features,
-                edge_index=edge_index_protein,
-                pos=residue_coords
-            )
-
-            protein_graph.key = key
-            target_features = self.esm_feats[key]
-            protein_graph.target_features = torch.FloatTensor([target_features])
-            
-            # 创建包含两个图的复合数据对象
-            data = DATA.Data(
-                drug_graph=drug_graph,
-                protein_graph=protein_graph,
-                y=torch.FloatTensor([labels]),
-            )
-            data_list.append(data)
-
-        if self.pre_filter is not None:
-            data_list = [data for data in data_list if self.pre_filter(data)]
-
-        if self.pre_transform is not None:
-            data_list = [self.pre_transform(data) for data in data_list]
-
-        print('Graph construction done. Saving to file.')
-        data, slices = self.collate(data_list)
-        torch.save((data, slices), self.processed_paths[0])
-        
-        
-class TestbedDatasetHMol(InMemoryDataset):
-    def __init__(self, root='/tmp', dataset='davis',
-                 xd=None, xt=None, y=None, transform=None, pre_transform=None,
-                 smile_graph=None, pocket_graph=None, fingerprint=None, esm_feats=None): 
-
-        self.dataset = dataset
-        self.xd = xd
-        self.xt = xt
-        self.y = y
-        self.smile_graph = smile_graph
-        self.pocket_graph = pocket_graph # This will now be the point cloud data
-        self.fingerprint = fingerprint
-        self.esm_feats = esm_feats
-
-        super(TestbedDatasetHMol, self).__init__(root, transform, pre_transform)
-
-        if os.path.isfile(self.processed_paths[0]):
-            print('Pre-processed data found: {}, loading ...'.format(self.processed_paths[0]))
-            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
-        else:
-            print('Pre-processed data {} not found, doing pre-processing...'.format(self.processed_paths[0]))
-            self.process()
-            self.data, self.slices = torch.load(self.processed_paths[0], weights_only=False)
-
-    @property
-    def raw_file_names(self):
-        return []
-
-    @property
-    def processed_file_names(self):
-        return [self.dataset + '.pt']
-
-    def download(self):
-        pass
-
-    def _download(self):
-        pass
-
-    def _process(self):
-        if not os.path.exists(self.processed_dir):
-            os.makedirs(self.processed_dir)
-
-    def process(self):
-        assert (self.xd is not None and self.xt is not None and self.y is not None), "The three lists must be the same length!"
-        data_list = []
-        data_len = len(self.xd)
-
-        for i in range(data_len):
-            print('Converting data pair to graph: {}/{}'.format(i + 1, data_len))
-            smiles = self.xd[i]
-            key = self.xt[i]
-            labels = self.y[i]
-
-            # Process drug data (3D molecular graph)
+            # Process drug data
             smile_data = self.smile_graph[smiles]
-       
+
             drug_graph = DATA.Data(
-                x=torch.LongTensor(smile_data["x"]), 
+                x=torch.FloatTensor(smile_data["x"]),
                 edge_index=torch.LongTensor(smile_data["edge_index"]),
-                edge_attr=torch.LongTensor(smile_data["edge_attr"]),  
+                edge_attr=torch.LongTensor(smile_data["edge_attr"]),
             )
-                            
+
             drug_graph.c_size = torch.LongTensor([smile_data["num_part"]])
             drug_graph.smiles = smiles
-            drug_graph.fingerprint = torch.FloatTensor([self.fingerprint[smiles]]) 
-            
+            drug_graph.fingerprint = torch.FloatTensor([self.fingerprint[smiles]])
+
             # Process protein data
             pocket_data = self.pocket_graph[key]
-            
-            # num_residues = torch.LongTensor(pocket_data[0])
+
             node_features = torch.Tensor(pocket_data[1])
             edge_index_protein = torch.LongTensor(pocket_data[2])
             residue_coords = torch.FloatTensor(pocket_data[3])
-            
-            # print(node_features, residue_coords)
 
             protein_graph = DATA.Data(
                 x=node_features,
@@ -197,24 +80,30 @@ class TestbedDatasetHMol(InMemoryDataset):
             protein_graph.key = key
             target_features = self.esm_feats[key]
             protein_graph.target_features = torch.FloatTensor([target_features])
-            
-            # 创建包含两个图的复合数据对象
+
             data = DATA.Data(
                 drug_graph=drug_graph,
                 protein_graph=protein_graph,
                 y=torch.FloatTensor([labels]),
             )
-            data_list.append(data)
+            self.data_list.append(data)
 
         if self.pre_filter is not None:
-            data_list = [data for data in data_list if self.pre_filter(data)]
+            self.data_list = [data for data in self.data_list if self.pre_filter(data)]
 
         if self.pre_transform is not None:
-            data_list = [self.pre_transform(data) for data in data_list]
+            self.data_list = [self.pre_transform(data) for data in self.data_list]
 
-        print('Graph construction done. Saving to file.')
-        data, slices = self.collate(data_list)
-        torch.save((data, slices), self.processed_paths[0])
+        print(f'Graph construction done. Total samples: {len(self.data_list)}')
+
+    def __len__(self):
+        return len(self.data_list)
+
+    def __getitem__(self, idx):
+        data = self.data_list[idx]
+        if self.transform is not None:
+            data = self.transform(data)
+        return data
         
         
         

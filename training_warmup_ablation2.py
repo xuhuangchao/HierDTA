@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from torch.optim import RAdam, AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, LinearLR
-from models.UniMolDTA_ablation2 import DualDTA
+from models.model_ablation2 import HierDTA
 from utils import TestbedDatasetHMol, rmse_gpu, mse_gpu, ci_gpu, pearson_gpu, get_rm2_gpu
 from torch_geometric.loader import DataLoader
 import torch.nn.functional as F
@@ -16,7 +16,7 @@ import argparse
 # 添加命令行参数解析
 parser = argparse.ArgumentParser(description='Train DTA models with different seeds')
 parser.add_argument('--dataset_idx', type=int, default=0, help='Dataset index: 0 for davis, 1 for kiba')
-parser.add_argument('--model_idx', type=int, default=0, help='0-DualDTA')
+parser.add_argument('--model_idx', type=int, default=0, help='0-')
 parser.add_argument('--gpu_idx', type=int, default=0, help='GPU index to use')
 parser.add_argument('--strategy', type=str, default='random', help='Data split strategy')
 parser.add_argument('--seed', type=int, default=None, help='Specific seed to use')
@@ -108,7 +108,7 @@ def setup_seed(seed):
         
         
 datasets = [['davis','kiba'][args.dataset_idx]]  
-modeling = [DualDTA][args.model_idx]
+modeling = [][args.model_idx]
 model_st = modeling.__name__
 
 cuda_name = f"cuda:{args.gpu_idx}"
