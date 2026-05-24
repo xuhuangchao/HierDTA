@@ -22,8 +22,7 @@ parser.add_argument('--strategy', type=str, default='random', help='Data split s
 parser.add_argument('--seed', type=int, default=None, help='Specific seed to use')
 parser.add_argument('--lr', type=float, default=0.001, help='Learning rate to use')
 parser.add_argument('--batch_size', type=int, default=512, help='Batch size to use')
-parser.add_argument('--max_norm', type=float, default=1.0, help='max norm in clip to use') # random split:max_norm=5.0 clod split:max_norm=1.0 
-parser.add_argument('--suffix', type=str, default='hmol_motif', help='create_data file')
+parser.add_argument('--max_norm', type=float, default=1.0, help='max norm in clip to use') # random split:max_norm=5.0 clod split:max_norm=1.0
 
 parser.add_argument('--epoch', type=int, default=500, help='Epoches to use')  # 默认500
 parser.add_argument('--patience', type=int, default=50, help='Patience to use')
@@ -46,9 +45,12 @@ parser.add_argument('--use_surface', type=int, default=1, help='Use surface feat
 parser.add_argument('--emb_dim', type=int, default=128, help='Interaction embedding dim')
 parser.add_argument('--use_fingerprint', type=int, default=1, help='Use fingerprint branch (1=True, 0=False)')
 parser.add_argument('--use_p_global', type=int, default=1, help='Use global ESM protein branch (1=True, 0=False)')
-parser.add_argument('--use_a2p_attn', type=int, default=1, help='Use atom->protein cross-attention (1=True, 0=False)')
-parser.add_argument('--use_m2p_attn', type=int, default=1, help='Use motif->protein cross-attention (1=True, 0=False)')
-parser.add_argument('--use_protein_max_pool', type=int, default=1, help='Use protein max-pool augmentation (1=True, 0=False)')
+parser.add_argument('--interaction_mode', type=str, default='d2p', help='Interaction mode: d2p (Drug→Protein) or p2d (Protein→Drug)')
+parser.add_argument('--agg', type=str, default='mean', choices=['mean', 'sum', 'max'],
+                    help='Aggregation for atom-to-motif message passing (mean/sum/max)')
+
+# Optimizer
+parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for AdamW')
 
 args = parser.parse_args()
 
@@ -139,12 +141,9 @@ LR = args.lr
 strategy = args.strategy
 seeds = [args.seed] if args.seed is not None else [1,2,3,4,0]
 max_norm = args.max_norm
-suffix = args.suffix
 
 NUM_EPOCHS = args.epoch
-EARLY_STOPPING_PATIENCE = args.patience  
-T_max = args.epoch
-WARMUP_EPOCHS = 5
+EARLY_STOPPING_PATIENCE = args.patience
 
 TRAIN_BATCH_SIZE = batch_size
 TEST_BATCH_SIZE = batch_size
@@ -155,13 +154,13 @@ print('Epochs: ', NUM_EPOCHS)
 print('Batch size: ', TRAIN_BATCH_SIZE)
 print('patience: ', EARLY_STOPPING_PATIENCE)
 print('max norm: ', max_norm)
+print('weight_decay: ', args.weight_decay)
 print('Drug  : drug_hidden={}, drug_out={}, n_layers={}, heads={}, dropout={}'.format(
     args.drug_hidden, args.drug_out, args.n_layers_drug, args.heads, args.dropout))
 print('Protein: protein_hidden={}, protein_out={}, n_layers={}, use_surface={}'.format(
     args.protein_hidden, args.protein_out, args.n_layers_protein, bool(args.use_surface)))
-print('Interaction: emb_dim={}, dropout={}, fp={}, p_global={}, a2p={}, m2p={}, max_pool={}'.format(
-    args.emb_dim, args.dropout, bool(args.use_fingerprint), bool(args.use_p_global),
-    bool(args.use_a2p_attn), bool(args.use_m2p_attn), bool(args.use_protein_max_pool)))
+print('Interaction: emb_dim={}, dropout={}, fp={}, p_global={}'.format(
+    args.emb_dim, args.dropout, bool(args.use_fingerprint), bool(args.use_p_global)))
 
 name = f"runseed_seed"
 
@@ -174,7 +173,6 @@ for dataset in datasets:
         setup_seed(seed)
 
         # 构建路径
-        processed_data_dir = f'data/processed/{strategy}/seed_{seed}'
         dataset_prefix = dataset
         split_dir = f'split_data/seed_{seed}/{strategy}'
 
@@ -194,17 +192,14 @@ for dataset in datasets:
         test_drugs, test_prots, test_Y = list(df_test['Drug']), list(df_test['target_key']), list(df_test['Y'])
 
         train_data = TestbedDatasetHMol(
-            root=processed_data_dir, dataset=f'{dataset_prefix}_train_{suffix}',
             dataset_name=dataset, xd=train_drugs, xt=train_prots, y=train_Y,
             surface_k=args.surface_k
         )
         val_data = TestbedDatasetHMol(
-            root=processed_data_dir, dataset=f'{dataset_prefix}_val_{suffix}',
             dataset_name=dataset, xd=val_drugs, xt=val_prots, y=val_Y,
             surface_k=args.surface_k
         )
         test_data = TestbedDatasetHMol(
-            root=processed_data_dir, dataset=f'{dataset_prefix}_test_{suffix}',
             dataset_name=dataset, xd=test_drugs, xt=test_prots, y=test_Y,
             surface_k=args.surface_k
         )
@@ -237,17 +232,24 @@ for dataset in datasets:
             emb_dim=args.emb_dim,
             use_fingerprint=bool(args.use_fingerprint),
             use_p_global=bool(args.use_p_global),
-            use_a2p_attn=bool(args.use_a2p_attn),
-            use_m2p_attn=bool(args.use_m2p_attn),
-            use_protein_max_pool=bool(args.use_protein_max_pool)
+            interaction_mode=args.interaction_mode,
+            agg=args.agg
         ).to(device)
         loss_fn = nn.MSELoss()
-        optimizer = AdamW(model.parameters(), lr=LR, weight_decay=1e-4)  
-        warmup_scheduler = LinearLR(optimizer, start_factor=1e-6, end_factor=1.0, total_iters=WARMUP_EPOCHS)
-        main_scheduler = CosineAnnealingLR(optimizer, T_max=NUM_EPOCHS - WARMUP_EPOCHS, eta_min=1e-6)
-        scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, main_scheduler], milestones=[WARMUP_EPOCHS])
+        optimizer = AdamW(model.parameters(), lr=LR, weight_decay=args.weight_decay)
 
-        all_metrics = []
+        # Warmup (5 epochs) + Cosine Annealing
+        WARMUP_EPOCHS = 5
+        warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=WARMUP_EPOCHS)
+        cosine_scheduler = CosineAnnealingLR(
+            optimizer, T_max=NUM_EPOCHS - WARMUP_EPOCHS, eta_min=1e-6
+        )
+        scheduler = SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[WARMUP_EPOCHS]
+        )
+
         best_mse = 1000
         best_ci = 0
         best_epoch = -1

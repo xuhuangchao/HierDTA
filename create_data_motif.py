@@ -94,12 +94,13 @@ def match_fg_for_motif(submol):
             matched_embs.append(fg2emb[name])
     return matched_embs
 
-def smile_to_graph(smile):
+def smile_to_graph(smile, use_base_feat=False):
     """
     从 SMILES 构建一个包含原子和 Motif 节点的图。
     - 节点特征包含类型标识符 (原子=0, Motif=1)
     - 原子特征为 chemprop 标准 134维特征
-    - Motif 特征为 133维原子特征均值和fg2emb 官能团嵌入聚合
+    - Motif 特征：默认仅使用 ElementKG fg2emb 官能团嵌入 (133-dim)；
+      若 use_base_feat=True，则额外叠加原子 chemprop 特征直方图
     - 包含原子-原子, 原子-Motif两类边
     """
     try:
@@ -113,7 +114,7 @@ def smile_to_graph(smile):
     atom_features_list = [atom_features(atom) for atom in mol.GetAtoms()]
     x_atoms = np.array(atom_features_list, dtype=np.float32)  # [N_atoms, 134]
     num_atoms = x_atoms.shape[0]
-    
+
     print(f"x_atoms.shape: {x_atoms.shape}")
 
     atom_atom_edges = []
@@ -133,28 +134,51 @@ def smile_to_graph(smile):
         cliques = [list(range(num_atoms))]
         num_motifs = 1
 
-    # 3. --- Motif 节点特征计算 (133维: 原子特征均值 + fg2emb) ---
+    # 3. --- Motif 节点特征计算 (133-dim) ---
     motif_features_list = []
+    base_feats_list = []
+    fg_feats_list = []
+    matched_counts = []
     for clique in cliques:
         submol = get_clique_mol(mol, clique)
         matched_embs = match_fg_for_motif(submol)
 
-        # 基础特征: 组成原子的 chemprop 特征均值 (保底机制)
-        atom_feats_in_motif = np.array([atom_features_list[idx] for idx in clique], dtype=np.float32)
-        base_feat = np.mean(atom_feats_in_motif, axis=0)  # [133]
+        # 基础特征 (可选): 组成原子的 chemprop 特征直方图
+        if use_base_feat:
+            atom_feats_in_motif = np.array([atom_features_list[idx] for idx in clique], dtype=np.float32)
+            base_feat = np.sum(atom_feats_in_motif, axis=0)  # [133] 直方图/计数
+        else:
+            base_feat = np.zeros(133, dtype=np.float32)
+        base_feats_list.append(base_feat)
 
-        # 知识增强: fg2emb 官能团嵌入 (可能为空)
+        # 知识增强: ElementKG fg2emb 官能团嵌入 (可能为空)
         if len(matched_embs) > 0:
             fg_feat = np.mean(matched_embs, axis=0).astype(np.float32)
         else:
             fg_feat = np.zeros(133, dtype=np.float32)
+        fg_feats_list.append(fg_feat)
+        matched_counts.append(len(matched_embs))
 
-        # 融合: element-wise add，保持 133-dim
-        feature_vec = base_feat + fg_feat
+        # 融合策略
+        if use_base_feat:
+            feature_vec = base_feat + fg_feat  # element-wise add
+        else:
+            feature_vec = fg_feat  # 仅保留 ElementKG 本体嵌入
         motif_features_list.append(feature_vec)
 
     x_motifs = np.array(motif_features_list, dtype=np.float32)  # [N_motifs, 133]
     print(f"x_motifs.shape: {x_motifs.shape}")
+
+    # 打印特征统计信息（用于调试理解特征分布）
+    base_arr = np.array(base_feats_list)
+    fg_arr = np.array(fg_feats_list)
+   
+    print(f"  base_feat: dim={base_arr.shape[1]}, range=[{base_arr.min():.3f}, {base_arr.max():.3f}], "
+              f"mean={base_arr.mean():.3f}, std={base_arr.std():.3f}")
+    print(f"  fg_feat:   dim={fg_arr.shape[1]}, range=[{fg_arr.min():.3f}, {fg_arr.max():.3f}], "
+          f"mean={fg_arr.mean():.3f}, std={fg_arr.std():.3f}")
+    print(f"  matched_embs per motif: mean={np.mean(matched_counts):.2f}, max={np.max(matched_counts)}, "
+          f"zero_ratio={np.mean(np.array(matched_counts)==0):.2%}")
 
     # 4. --- 构建统一的节点特征矩阵 X ---
     # 统一维度: 133 + 1(类型标识符) = 134
@@ -166,25 +190,72 @@ def smile_to_graph(smile):
 
     x = np.concatenate([x_atoms_final, x_motifs_final], axis=0)  # [N_total, 134]
 
-    # 5. --- 构建边 (保持不变) ---
+    # 5. --- 构建双向 atom-motif 边 ---
     atom_motif_edges = []
+    atom_motif_edge_attr_list = []
     for k, motif in enumerate(cliques):
         motif_node_idx = num_atoms + k
         for atom_node_idx in motif:
-            atom_motif_edges.extend([[atom_node_idx, motif_node_idx],[motif_node_idx, atom_node_idx]])
+            # 正向: atom -> motif
+            atom_motif_edges.append([atom_node_idx, motif_node_idx])
+            atom_motif_edge_attr_list.append([2] + [0] * (BOND_FDIM - 1))
+            # 反向: motif -> atom
+            atom_motif_edges.append([motif_node_idx, atom_node_idx])
+            atom_motif_edge_attr_list.append([3] + [0] * (BOND_FDIM - 1))
 
     edge_index = np.concatenate([
         np.array(atom_atom_edges).T if atom_atom_edges else np.empty((2, 0)),
         np.array(atom_motif_edges).T if atom_motif_edges else np.empty((2, 0))
     ], axis=1)
-    
-#     0：真实化学键
-#   - 1：空键（chemprop null）
-#   - 2：原子–Motif 结构隶属边
-    atom_motif_edge_attr = np.array([[2] + [0] * (BOND_FDIM - 1)] * len(atom_motif_edges), dtype=np.float32)
+
+    # 6. --- 构建 motif-motif 边 ---
+    # 如果两个 motif 的组成原子之间存在化学键，则这两个 motif 相邻
+    from collections import defaultdict
+    atom_to_motifs = defaultdict(list)
+    for k, motif in enumerate(cliques):
+        for atom_idx in motif:
+            atom_to_motifs[atom_idx].append(k)
+
+    motif_motif_edges = []
+    seen_pairs = set()
+    for bond in mol.GetBonds():
+        u = bond.GetBeginAtomIdx()
+        v = bond.GetEndAtomIdx()
+        motifs_u = atom_to_motifs.get(u, [])
+        motifs_v = atom_to_motifs.get(v, [])
+        for mi in motifs_u:
+            for mj in motifs_v:
+                if mi != mj:
+                    pair = tuple(sorted((mi, mj)))
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        gmi = num_atoms + mi
+                        gmj = num_atoms + mj
+                        motif_motif_edges.append([gmi, gmj])
+                        motif_motif_edges.append([gmj, gmi])
+
+    motif_motif_edge_attr = np.array(
+        [[4] + [0] * (BOND_FDIM - 1)] * len(motif_motif_edges),
+        dtype=np.float32
+    )
+
+    # 边类型说明：
+    #   0: 真实化学键 (bond is not None)
+    #   1: 空键 (chemprop null)
+    #   2: atom -> motif (正向隶属边)
+    #   3: motif -> atom (反向隶属边)
+    #   4: motif <-> motif (子结构邻接边)
+    edge_index = np.concatenate([
+        np.array(atom_atom_edges).T if atom_atom_edges else np.empty((2, 0)),
+        np.array(atom_motif_edges).T if atom_motif_edges else np.empty((2, 0)),
+        np.array(motif_motif_edges).T if motif_motif_edges else np.empty((2, 0)),
+    ], axis=1)
+
+    atom_motif_edge_attr = np.array(atom_motif_edge_attr_list, dtype=np.float32)
     edge_attr = np.concatenate([
         np.array(atom_atom_edge_features) if atom_atom_edge_features else np.empty((0, BOND_FDIM)),
         atom_motif_edge_attr,
+        motif_motif_edge_attr,
     ], axis=0)
 
     num_part = x.shape[0]
@@ -269,6 +340,9 @@ if __name__ == '__main__':
                         help='k for surface-to-residue mapping (must match surface_process.py)')
     parser.add_argument('--gpu_idx', type=int, default=0,
                         help='GPU index to use for ESM inference')
+    parser.add_argument('--use_base_feat', type=int, default=0,
+                        help='Use chemprop atom histogram as motif base feature (1=True, 0=False). '
+                             'Default 0 means motif feature = ElementKG fg2emb only.')
     args = parser.parse_args()
 
     dataset = args.dataset
@@ -298,7 +372,7 @@ if __name__ == '__main__':
     fingerprint = {}
 
     for smile in compound_iso_smiles:
-        g = smile_to_graph(smile)
+        g = smile_to_graph(smile, use_base_feat=bool(args.use_base_feat))
         if g is not None:
             smile_graph[smile] = g
 

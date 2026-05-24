@@ -8,38 +8,26 @@ from torch_geometric import data as DATA
 import torch
 
 class TestbedDatasetHMol(Dataset):
-    def __init__(self, root='/tmp', dataset='davis',
-                 xd=None, xt=None, y=None, transform=None, pre_transform=None, pre_filter=None,
-                 smile_graph=None, pocket_graph=None, fingerprint=None, esm_feats=None,
+    def __init__(self, xd=None, xt=None, y=None, transform=None,
                  dataset_name=None, cache_dir='data/cache', surface_k=5):
-
-        self.dataset = dataset
         self.xd = xd
         self.xt = xt
         self.y = y
-        self.smile_graph = smile_graph
-        self.pocket_graph = pocket_graph
-        self.fingerprint = fingerprint
-        self.esm_feats = esm_feats
         self.dataset_name = dataset_name
         self.cache_dir = cache_dir
         self.surface_k = surface_k
         self.transform = transform
-        self.pre_transform = pre_transform
-        self.pre_filter = pre_filter
 
         assert (self.xd is not None and self.xt is not None and self.y is not None), "The three lists must be the same length!"
+        assert self.dataset_name is not None, "Must provide dataset_name"
 
-        # 如果未传入特征字典，从全局 cache 加载（与 seed/strategy 无关）
-        if self.smile_graph is None:
-            assert self.dataset_name is not None, "Must provide dataset_name when using cache mode"
-            cache_dir = self.cache_dir
-            print(f'Loading global caches from {cache_dir} for dataset {self.dataset_name} (surface_k={self.surface_k})...')
-            self.smile_graph = torch.load(f'{cache_dir}/{self.dataset_name}_smile_graph.pt', weights_only=False)
-            self.fingerprint = torch.load(f'{cache_dir}/{self.dataset_name}_fingerprint.pt', weights_only=False)
-            self.pocket_graph = torch.load(f'{cache_dir}/{self.dataset_name}_protein_graphs_k{self.surface_k}.pt', weights_only=False)
-            self.esm_feats = torch.load(f'{cache_dir}/{self.dataset_name}_esm_feats.pt', weights_only=False)
-            print('Cache loaded. Assembling data pairs...')
+        # 从全局 cache 加载（与 seed/strategy 无关）
+        print(f'Loading global caches from {self.cache_dir} for dataset {self.dataset_name} (surface_k={self.surface_k})...')
+        self.smile_graph = torch.load(f'{self.cache_dir}/{self.dataset_name}_smile_graph.pt', weights_only=False)
+        self.fingerprint = torch.load(f'{self.cache_dir}/{self.dataset_name}_fingerprint.pt', weights_only=False)
+        self.pocket_graph = torch.load(f'{self.cache_dir}/{self.dataset_name}_protein_graphs_k{self.surface_k}.pt', weights_only=False)
+        self.esm_feats = torch.load(f'{self.cache_dir}/{self.dataset_name}_esm_feats.pt', weights_only=False)
+        print('Cache loaded. Assembling data pairs...')
 
         self.data_list = []
         data_len = len(self.xd)
@@ -87,12 +75,6 @@ class TestbedDatasetHMol(Dataset):
                 y=torch.FloatTensor([labels]),
             )
             self.data_list.append(data)
-
-        if self.pre_filter is not None:
-            self.data_list = [data for data in self.data_list if self.pre_filter(data)]
-
-        if self.pre_transform is not None:
-            self.data_list = [self.pre_transform(data) for data in self.data_list]
 
         print(f'Graph construction done. Total samples: {len(self.data_list)}')
 

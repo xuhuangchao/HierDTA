@@ -8,7 +8,7 @@ python training_warmup.py \
   --drug_hidden 64 --drug_out 128 --n_layers_drug 2 --heads 2 --dropout 0.2 \
   --protein_hidden 128 --protein_out 128 --n_layers_protein 4 --use_surface 1 \
   --emb_dim 128 \
-  --use_fingerprint 1 --use_p_global 1 --use_a2p_attn 1 --use_m2p_attn 1 --use_protein_max_pool 1
+  --use_fingerprint 1 --use_p_global 1 --use_protein_max_pool 1
 
 以下实验只需替换对应的 strategy/seed/消融参数即可。
 
@@ -57,24 +57,9 @@ max_norm=5.0
 --use_p_global 0
 其余参数保持基线默认值。
 
-2.4 去除 Cross-Attention（a2p + m2p 全关）
---------------------------------------------------------------
---use_a2p_attn 0 --use_m2p_attn 0
-此时 multi_level_reps 退化为 global_mean_pool(h_node_p)。
-
-2.5 去除 Protein Max Pool
+2.4 去除 Protein Max Pool
 --------------------------------------------------------------
 --use_protein_max_pool 0
-其余参数保持基线默认值。
-
-2.6 仅保留 atom->protein 注意力
---------------------------------------------------------------
---use_m2p_attn 0
-其余参数保持基线默认值。
-
-2.7 仅保留 motif->protein 注意力
---------------------------------------------------------------
---use_a2p_attn 0
 其余参数保持基线默认值。
 
 ============================================================
@@ -160,7 +145,7 @@ strategy=cold_drug, --use_surface 0
 
 阶段 1（第 1 周）：
   - 1.1 random baseline（5 seeds）
-  - 2.1 ~ 2.7 消融实验（各 3 seeds）
+  - 2.1 ~ 2.4 消融实验（各 3 seeds）
 
 阶段 2（第 2 周）：
   - 1.2 cold_drug baseline（5 seeds）
