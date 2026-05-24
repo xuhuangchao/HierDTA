@@ -208,59 +208,6 @@ results_{dataset}/{strategy}/seed_{seed}/
 
 ---
 
-## Important Design Notes
-
-### No Persistent Dataset `.pt` Files
-
-`TestbedDatasetHMol` now inherits from `torch.utils.data.Dataset` instead of `PyG's InMemoryDataset`. It assembles data pairs **in-memory directly from global caches** on every run. There is no disk I/O for per-split `.pt` files. This eliminates redundant storage and makes switching between seeds/strategies instantaneous.
-
-### Configurable Surface Mapping `k`
-
-The nearest-neighbor parameter `k` for mapping dMaSIF surface points to residues is fully configurable (`3, 5, 8`, etc.). Each `k` produces an isolated cache (`protein_graphs_k{k}.pt`), so multiple experiments can coexist without collision.
-
-### Preprocessing Paths
-
-All protein preprocessing outputs are organized under a single directory:
-
-```
-data/{dataset}/preprocessed/
-├── sequence/
-├── surface_points/
-└── residue_surface/k{k}/
-```
-
----
-
-## Model Hyperparameters
-
-| Component       | Hyperparameter      | Value       |
-| --------------- | ------------------- | ----------- |
-| DrugMotifGAT    | `in_channels`     | 133         |
-|                 | `hidden_channels` | 64          |
-|                 | `out_channels`    | 128         |
-|                 | `num_layers`      | 2           |
-|                 | `heads`           | 2           |
-|                 | `dropout`         | 0.2         |
-| ProteinEGNN     | `num_features_xt` | 608         |
-|                 | `hidden_nf`       | 128         |
-|                 | `output_dim`      | 128         |
-|                 | `n_layers`        | 4           |
-| DualInteraction | `emb_dim`         | 128         |
-|                 | `fp_dim`          | 1024        |
-|                 | `esm_dim`         | 480         |
-| MLP Decoder     | `hidden_dims`     | 1024 → 256 |
-
----
-
-## Ablation Studies
-
-Two additional training scripts are provided for ablation experiments:
-
-- `training_warmup_ablation.py`: ablates fingerprint, ESM global, and multi-level representations.
-- `training_warmup_ablation2.py`: ablates a2p attention, m2p attention, and protein max pooling.
-
----
-
 ## Citation
 
 If you use HierDTA in your research, please cite:
