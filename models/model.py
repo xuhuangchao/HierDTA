@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from .drug_model import *
 from .protein_model import *
 from torch_geometric.utils import to_dense_batch
+from torch_geometric.nn import global_max_pool
 
 class MLPFusionLayer(nn.Module):
     def __init__(self, input_dim, output_dim, hidden_dim=None, dropout_rate=0.2):
@@ -57,10 +58,9 @@ class CoAttentionModule(nn.Module):
                 nn.Linear(esm_dim, 256), nn.ReLU(), nn.Dropout(dropout), nn.Linear(256, emb_dim)
             )
 
-        drug_in_dim = emb_dim + (emb_dim if use_fingerprint else 0)
-        prot_in_dim = emb_dim + (emb_dim if use_p_global else 0)
+        drug_in_dim = 2*emb_dim + (emb_dim if use_fingerprint else 0)
+        prot_in_dim = 2*emb_dim + (emb_dim if use_p_global else 0)
 
-        # Bilinear 融合：[drug_global + fp] ⊗ [prot_global + esm] → fused
         self.bilinear = nn.Bilinear(drug_in_dim, prot_in_dim, emb_dim)
 
         self.predictor = MLPDecoder(emb_dim, 256, 1, dropout=dropout)
@@ -85,15 +85,26 @@ class CoAttentionModule(nn.Module):
         drug_context = torch.bmm(attn_d2p, prot_rep)
 
         # 4. Protein → Drug cross-attention: protein 残基关注 drug 节点
-        scores_p2d = torch.bmm(prot_h, drug_h.transpose(1, 2)) / (self.emb_dim ** 0.5)
+        scores_p2d = scores_d2p.transpose(1, 2)  # = (drug_h @ prot_h^T)^T, 省一次 bmm
         attn_p2d = self._masked_softmax(scores_p2d, drug_mask, dim=2)
         prot_context = torch.bmm(attn_p2d, drug_rep)
 
-        # 5. 全局读出示（masked mean pooling）
+        # 5. 全局读出示（masked mean pooling + 固有信号 max pooling）
         drug_mask_f = drug_mask.float().unsqueeze(-1)
         prot_mask_f = prot_mask.float().unsqueeze(-1)
-        drug_global = (drug_context * drug_mask_f).sum(dim=1) / drug_mask_f.sum(dim=1).clamp(min=1e-9)
-        prot_global = (prot_context * prot_mask_f).sum(dim=1) / prot_mask_f.sum(dim=1).clamp(min=1e-9)
+
+        # Mean pooling on cross-attention context
+        drug_global_mean = (drug_context * drug_mask_f).sum(dim=1) / drug_mask_f.sum(dim=1).clamp(min=1e-9)
+        prot_global_mean = (prot_context * prot_mask_f).sum(dim=1) / prot_mask_f.sum(dim=1).clamp(min=1e-9)
+
+        # Max pooling on raw encoder features（双向交互前的固有信号）
+        drug_gmp = global_max_pool(h_node_d, batch_d)
+        prot_gmp = global_max_pool(h_node_p, batch_p)
+
+        # drug_global = drug_global_mean + drug_gmp
+        # prot_global = prot_global_mean + prot_gmp
+        drug_global = torch.cat([drug_global_mean, drug_gmp], dim=-1)
+        prot_global = torch.cat([prot_global_mean, prot_gmp], dim=-1)
 
         # 6. 拼接指纹/ESM 先验到全局表示中，使得先验参与 Bilinear 交互
         drug_reps = [drug_global]
@@ -106,7 +117,7 @@ class CoAttentionModule(nn.Module):
             prot_reps.append(self.esm_projection(esm_feat))
         prot_enhanced = torch.cat(prot_reps, dim=-1)
 
-        # 7. Bilinear 融合：drug_enhanced ⊗ prot_enhanced
+        # 7.Bilinear 融合
         fused = self.bilinear(drug_enhanced, prot_enhanced)
 
         # 8. 直接预测（指纹和 ESM 已在 Bilinear 中参与交互，无需后期拼接）

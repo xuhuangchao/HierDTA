@@ -8,8 +8,8 @@ for seed in 0 1 2 3 4; do
   python training_warmup.py \
     --seed $seed \
     --dataset_idx 0 \
-    --gpu_idx 1 \
-    --strategy cold_drug \
+    --gpu_idx 0 \
+    --strategy cold_target \
     --epoch 500 \
     --lr 1e-3 \
     --patience 30 \

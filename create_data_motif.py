@@ -84,7 +84,7 @@ def bond_features(bond):
     return fbond
 
 
-def smile_to_graph(smile):
+def smile_to_graph(smile, verbose=False):
     """
     从 SMILES 构建纯原子拓扑图。
     - 原子特征: chemprop one-hot (133-d) + ele2emb (133-d) = 266-d
@@ -93,9 +93,12 @@ def smile_to_graph(smile):
     try:
         mol = Chem.MolFromSmiles(smile)
         if mol is None:
-            return None
+            return None, None
     except Exception as e:
-        return None
+        return None, None
+
+    n_atoms = mol.GetNumAtoms()
+    n_bonds = mol.GetNumBonds()
 
     # 1. 原子节点
     atom_features_list = [atom_features(atom) for atom in mol.GetAtoms()]
@@ -113,12 +116,27 @@ def smile_to_graph(smile):
     edge_index = np.array(edges).T if edges else np.empty((2, 0))
     edge_attr = np.array(edge_features, dtype=np.float32) if edge_features else np.empty((0, BOND_FDIM))
 
+    if verbose:
+        # --- 特征数值检查 ---
+        print(f"\n{'='*60}")
+        print(f"SMILES: {smile}")
+        print(f"  原子数: {n_atoms}, 化学键数: {n_bonds}")
+        print(f"  x 形状: {x.shape}, dtype: {x.dtype}")
+        print(f"  x[0] 前 10 维 (chemprop one-hot):  {x[0, :10]}")
+        print(f"  x[0] 后 5 维 (ele2emb 尾部):      {x[0, -5:]}")
+        print(f"  x 非零比例: {np.count_nonzero(x)/x.size:.3f}")
+        print(f"  edge_index 形状: {edge_index.shape}")
+        print(f"  edge_attr 形状: {edge_attr.shape}")
+        if edge_attr.shape[0] > 0:
+            print(f"  edge_attr[0]: {edge_attr[0]}")
+        print(f"{'='*60}\n")
+
     return {
         'x': x,
         'edge_index': edge_index,
         'edge_attr': edge_attr,
-        'num_part': x.shape[0]
-    }
+        'num_part': x.shape[0],
+    }, mol
 
 
 # --- New Protein Residue Graph Construction ---
@@ -221,13 +239,16 @@ if __name__ == '__main__':
 
     smile_graph = {}
     fingerprint = {}
+    verbose_count = 0
 
     for smile in compound_iso_smiles:
-        g = smile_to_graph(smile)
+        verbose = (verbose_count < 3)
+        g, mol = smile_to_graph(smile, verbose=verbose)
+        if verbose:
+            verbose_count += 1
         if g is not None:
             smile_graph[smile] = g
 
-        mol = Chem.MolFromSmiles(smile)
         if mol is None:
             continue
         ecfp_arr = mg.GetFingerprintAsNumPy(mol)

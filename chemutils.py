@@ -64,31 +64,6 @@ def one_of_k_encoding_unk(x, allowable_set):
         x = allowable_set[-1]
     return list(map(lambda s: x == s, allowable_set))
 
-# def atom_features(atom):
-#     original_features = np.array(
-#         # Atom type (one-hot encoding)
-#         one_of_k_encoding_unk(atom.GetSymbol(), ['C', 'N', 'O', 'F', 'P', 'S', 'Cl', 'Br', 'I', 'B', 'Si', 'Fe', 'Zn', 'Cu', 'Mn', 'Mo', 'other']) +
-        
-#         # Atom degree (one-hot encoding)
-#         one_of_k_encoding(atom.GetDegree(), [0, 1, 2, 3, 4, 5, 6]) +
-        
-#         # Atom hybridization (one-hot encoding)
-#         one_of_k_encoding_unk(str(atom.GetHybridization()), ['sp', 'sp2', 'sp3', 'sp3d', 'sp3d2', 'other']) +
-        
-#         # Atom total num H (one-hot encoding)
-#         one_of_k_encoding_unk(atom.GetTotalNumHs(), [0, 1, 2, 3, 4]) +
-        
-#         # Atom implicit valence
-#         one_of_k_encoding_unk(atom.GetImplicitValence(), [0, 1, 2, 3, 4, 5, 6]) +
-        
-#         # Atom chirality (one-hot encoding)
-#         one_of_k_encoding_unk(str(atom.GetChiralTag()), ['CHI_UNSPECIFIED', 'CHI_TETRAHEDRAL_CW', 'CHI_TETRAHEDRAL_CCW', 'CHI_OTHER']) +
-        
-#         # Atom is aromatic
-#         [atom.GetIsAromatic()]
-#     )
-#     return original_features
-
 def motif_decomp(mol):
     n_atoms = mol.GetNumAtoms()
     if n_atoms <= 1:

@@ -32,7 +32,7 @@ parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate for
 # Protein architecture
 parser.add_argument('--protein_hidden', type=int, default=128, help='Protein EGNN hidden dim')
 parser.add_argument('--protein_out', type=int, default=128, help='Protein EGNN output dim (must equal emb_dim)')
-parser.add_argument('--n_layers_protein', type=int, default=4, help='Protein EGNN num layers')
+parser.add_argument('--n_layers_protein', type=int, default=2, help='Protein EGNN num layers')
 parser.add_argument('--use_surface', type=int, default=1, help='Use surface features (1=True, 0=False)')
 
 # Interaction & ablation
@@ -43,7 +43,6 @@ parser.add_argument('--use_p_global', type=int, default=1, help='Use global ESM 
 # Optimizer
 parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for AdamW')
 
-# LR Scheduler
 # LR Scheduler
 parser.add_argument('--lr_patience', type=int, default=5, help='ReduceLROnPlateau patience epochs')
 parser.add_argument('--lr_factor', type=float, default=0.95, help='ReduceLROnPlateau decay factor')
@@ -152,7 +151,7 @@ print('Protein: protein_hidden={}, protein_out={}, n_layers={}, use_surface={}'.
 print('Interaction: emb_dim={}, dropout={}, fp={}, p_global={}'.format(
     args.emb_dim, args.dropout, bool(args.use_fingerprint), bool(args.use_p_global)))
 
-name = f"runseed_seed"
+name = f"0525_gmpcat"
 
 # --- 单次训练 ---
 print(f'\nRunning on {model_st}_{dataset} with seed {seed}, strategy {strategy}')

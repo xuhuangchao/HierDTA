@@ -8,14 +8,14 @@ EDGE_DIM = 14  # chemprop bond features dim
 
 class DrugModel(nn.Module):
     """
-    PyG 内置 AttentiveFP 药物编码器。
-    输入原子图，直接输出分子级别表示 [batch_size, out_channels]。
+    PyG AttentiveFP 药物编码器 — 纯原子图。
+    输入原子图，输出节点级表征 [total_atoms, out_channels]。
     """
     def __init__(self, in_channels=266, hidden_channels=128, out_channels=128,
                  num_layers=2, edge_dim=EDGE_DIM, dropout=0.2,
                  heads=None, num_timesteps=2):
         super().__init__()
-       
+
         self.attentive_fp = AttentiveFP(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
