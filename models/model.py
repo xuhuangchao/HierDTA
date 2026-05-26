@@ -4,22 +4,6 @@ import torch.nn.functional as F
 from .drug_model import *
 from .protein_model import *
 from torch_geometric.utils import to_dense_batch
-from torch_geometric.nn import global_max_pool
-
-class MLPFusionLayer(nn.Module):
-    def __init__(self, input_dim, output_dim, hidden_dim=None, dropout_rate=0.2):
-        super().__init__()
-        if hidden_dim is None:
-            hidden_dim = (input_dim + output_dim) // 2
-        self.fusion_mlp = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim, output_dim)
-        )
-    def forward(self, concatenated_features):
-        fused_representation = self.fusion_mlp(concatenated_features)
-        return fused_representation
 
 class MLPDecoder(nn.Module):
     def __init__(self, in_dim, hidden_dim, out_dim, dropout=0.2):
@@ -33,11 +17,9 @@ class MLPDecoder(nn.Module):
         x = self.fc2(x)
         return x
 
+
 class CoAttentionModule(nn.Module):
-    """
-    双向节点交互 + Bilinear 融合模块。
-    Drug↔Protein cross-attention → fp/esm 增强全局表示 → Bilinear fusion → MLP 预测。
-    """
+    """Bidirectional cross-attention with independent Q/K/V projections per direction."""
     def __init__(self, emb_dim, fp_dim=1024, esm_dim=480, dropout=0.2,
                  use_fingerprint=True, use_p_global=True):
         super().__init__()
@@ -45,10 +27,17 @@ class CoAttentionModule(nn.Module):
         self.use_fingerprint = use_fingerprint
         self.use_p_global = use_p_global
 
-        # 共享投影层（Drug / Protein 共用，保持语义空间一致）
-        self.interaction_proj = nn.Linear(emb_dim, emb_dim)
+        # D->P direction: drug as Query, protein as Key / Value
+        self.drug_q_proj = nn.Linear(emb_dim, emb_dim)
+        self.prot_k_proj = nn.Linear(emb_dim, emb_dim)
+        self.prot_v_proj = nn.Linear(emb_dim, emb_dim)
 
-        # 指纹 / ESM 投影到 emb_dim，用于与 cross-attn 读出示拼接
+        # P->D direction: protein as Query, drug as Key / Value
+        self.prot_q_proj = nn.Linear(emb_dim, emb_dim)
+        self.drug_k_proj = nn.Linear(emb_dim, emb_dim)
+        self.drug_v_proj = nn.Linear(emb_dim, emb_dim)
+
+        # Auxiliary priors
         if self.use_fingerprint:
             self.fp_projection = nn.Sequential(
                 nn.Linear(fp_dim, 512), nn.ReLU(), nn.Dropout(dropout), nn.Linear(512, emb_dim)
@@ -58,11 +47,10 @@ class CoAttentionModule(nn.Module):
                 nn.Linear(esm_dim, 256), nn.ReLU(), nn.Dropout(dropout), nn.Linear(256, emb_dim)
             )
 
-        drug_in_dim = 2*emb_dim + (emb_dim if use_fingerprint else 0)
-        prot_in_dim = 2*emb_dim + (emb_dim if use_p_global else 0)
-
-        self.bilinear = nn.Bilinear(drug_in_dim, prot_in_dim, emb_dim)
-
+        # Bilinear interaction + MLP decoder
+        drug_in = emb_dim + (emb_dim if use_fingerprint else 0)
+        prot_in = emb_dim + (emb_dim if use_p_global else 0)
+        self.bilinear = nn.Bilinear(drug_in, prot_in, emb_dim)
         self.predictor = MLPDecoder(emb_dim, 256, 1, dropout=dropout)
 
     def _masked_softmax(self, scores, mask, dim):
@@ -71,63 +59,57 @@ class CoAttentionModule(nn.Module):
         return F.softmax(scores, dim=dim)
 
     def forward(self, h_node_d, batch_d, h_node_p, batch_p, fingerprint, esm_feat):
-        # 1. 转换为 dense batch 格式
+        # Dense batch packing
         drug_rep, drug_mask = to_dense_batch(h_node_d, batch_d)
         prot_rep, prot_mask = to_dense_batch(h_node_p, batch_p)
 
-        # 2. 线性投影
-        drug_h = F.relu(self.interaction_proj(drug_rep))
-        prot_h = F.relu(self.interaction_proj(prot_rep))
+        # Q/K/V projections (no activation — standard Transformer-style linear projections)
+        drug_q = self.drug_q_proj(drug_rep)
+        prot_k = self.prot_k_proj(prot_rep)
+        prot_v = self.prot_v_proj(prot_rep)
 
-        # 3. Drug → Protein cross-attention: drug 节点关注 protein 残基
-        scores_d2p = torch.bmm(drug_h, prot_h.transpose(1, 2)) / (self.emb_dim ** 0.5)
+        prot_q = self.prot_q_proj(prot_rep)
+        drug_k = self.drug_k_proj(drug_rep)
+        drug_v = self.drug_v_proj(drug_rep)
+
+        # D->P cross-attention: drug queries read protein keys/values
+        scores_d2p = torch.bmm(drug_q, prot_k.transpose(1, 2)) / (self.emb_dim ** 0.5)
         attn_d2p = self._masked_softmax(scores_d2p, prot_mask, dim=2)
-        drug_context = torch.bmm(attn_d2p, prot_rep)
+        drug_cross = torch.bmm(attn_d2p, prot_v)           # (B, N_drug, D) 
 
-        # 4. Protein → Drug cross-attention: protein 残基关注 drug 节点
-        scores_p2d = scores_d2p.transpose(1, 2)  # = (drug_h @ prot_h^T)^T, 省一次 bmm
+        # P->D cross-attention: protein queries read drug keys/values
+        scores_p2d = torch.bmm(prot_q, drug_k.transpose(1, 2)) / (self.emb_dim ** 0.5)
         attn_p2d = self._masked_softmax(scores_p2d, drug_mask, dim=2)
-        prot_context = torch.bmm(attn_p2d, drug_rep)
+        prot_cross = torch.bmm(attn_p2d, drug_v)           # (B, N_prot, D) 
 
-        # 5. 全局读出示（masked mean pooling + 固有信号 max pooling）
+        # Masked mean pooling over cross-attention outputs
         drug_mask_f = drug_mask.float().unsqueeze(-1)
         prot_mask_f = prot_mask.float().unsqueeze(-1)
 
-        # Mean pooling on cross-attention context
-        drug_global_mean = (drug_context * drug_mask_f).sum(dim=1) / drug_mask_f.sum(dim=1).clamp(min=1e-9)
-        prot_global_mean = (prot_context * prot_mask_f).sum(dim=1) / prot_mask_f.sum(dim=1).clamp(min=1e-9)
+        # Standard semantics: drug_cross 是 drug 节点的输出 → 池化后为 drug 侧表征
+        drug_repr = (drug_cross * drug_mask_f).sum(dim=1) / drug_mask_f.sum(dim=1).clamp(min=1e-9)
+        # Standard semantics: prot_cross 是 protein 节点的输出 → 池化后为 protein 侧表征
+        prot_repr = (prot_cross * prot_mask_f).sum(dim=1) / prot_mask_f.sum(dim=1).clamp(min=1e-9)
 
-        # Max pooling on raw encoder features（双向交互前的固有信号）
-        drug_gmp = global_max_pool(h_node_d, batch_d)
-        prot_gmp = global_max_pool(h_node_p, batch_p)
-
-        # drug_global = drug_global_mean + drug_gmp
-        # prot_global = prot_global_mean + prot_gmp
-        drug_global = torch.cat([drug_global_mean, drug_gmp], dim=-1)
-        prot_global = torch.cat([prot_global_mean, prot_gmp], dim=-1)
-
-        # 6. 拼接指纹/ESM 先验到全局表示中，使得先验参与 Bilinear 交互
-        drug_reps = [drug_global]
+        # Auxiliary priors concatenated to their own side
+        drug_final = drug_repr
         if self.use_fingerprint:
-            drug_reps.append(self.fp_projection(fingerprint))
-        drug_enhanced = torch.cat(drug_reps, dim=-1)
-
-        prot_reps = [prot_global]
+            drug_final = torch.cat([drug_final, self.fp_projection(fingerprint)], dim=-1)
+        prot_final = prot_repr 
         if self.use_p_global:
-            prot_reps.append(self.esm_projection(esm_feat))
-        prot_enhanced = torch.cat(prot_reps, dim=-1)
+            prot_final = torch.cat([prot_final, self.esm_projection(esm_feat)], dim=-1)
 
-        # 7.Bilinear 融合
-        fused = self.bilinear(drug_enhanced, prot_enhanced)
-
-        # 8. 直接预测（指纹和 ESM 已在 Bilinear 中参与交互，无需后期拼接）
+        fused = self.bilinear(drug_final, prot_final)
         logits = self.predictor(fused)
 
         output_dict = {
             'attn_d2p': attn_d2p,
-            'attn_p2d': attn_p2d
+            'attn_p2d': attn_p2d,
+            'scores_d2p': scores_d2p,
+            'scores_p2d': scores_p2d,
         }
         return logits, output_dict
+
 
 class HierDTA(nn.Module):
     def __init__(self,
@@ -167,6 +149,7 @@ class HierDTA(nn.Module):
             n_layers=n_layers_protein,
             use_surface=use_surface
         )
+        # print(self.protein_net)
 
         self.interaction = CoAttentionModule(
             emb_dim=emb_dim,
@@ -174,9 +157,9 @@ class HierDTA(nn.Module):
             esm_dim=esm_dim,
             dropout=dropout,
             use_fingerprint=use_fingerprint,
-            use_p_global=use_p_global
+            use_p_global=use_p_global,
         )
-        
+        print(self.interaction)
 
     def forward(self, data):
         h_node_d, batch_d, fingerprint = self.drug_net(data.drug_graph)

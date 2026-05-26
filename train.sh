@@ -11,6 +11,7 @@ for seed in 0 1 2 3 4; do
     --gpu_idx 1 \
     --strategy cold_drug \
     --epoch 500 \
+    --batch_size 256 \
     --lr 1e-3 \
     --patience 30 \
     --surface_k 5 \

@@ -4,7 +4,7 @@ import sys, os, random
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau, LinearLR
 from models.model import HierDTA
 from utils import TestbedDatasetHMol, rmse_gpu, mse_gpu, ci_gpu, pearson_gpu, get_rm2_gpu
 from torch_geometric.loader import DataLoader
@@ -40,12 +40,14 @@ parser.add_argument('--emb_dim', type=int, default=128, help='Interaction embedd
 parser.add_argument('--use_fingerprint', type=int, default=1, help='Use fingerprint branch (1=True, 0=False)')
 parser.add_argument('--use_p_global', type=int, default=1, help='Use global ESM protein branch (1=True, 0=False)')
 
+
 # Optimizer
 parser.add_argument('--weight_decay', type=float, default=1e-4, help='Weight decay for AdamW')
 
 # LR Scheduler
 parser.add_argument('--lr_patience', type=int, default=5, help='ReduceLROnPlateau patience epochs')
 parser.add_argument('--lr_factor', type=float, default=0.95, help='ReduceLROnPlateau decay factor')
+parser.add_argument('--warmup_epochs', type=int, default=0, help='Linear LR warmup epochs (0 to disable)')
 
 args = parser.parse_args()
 
@@ -144,14 +146,15 @@ print('Batch size: ', TRAIN_BATCH_SIZE)
 print('patience: ', EARLY_STOPPING_PATIENCE)
 print('weight_decay: ', args.weight_decay)
 print('lr_patience: ', args.lr_patience, 'lr_factor: ', args.lr_factor)
+print('warmup_epochs: ', args.warmup_epochs)
 print('Drug  : drug_hidden={}, drug_out={}, n_layers={}, dropout={}'.format(
     args.drug_hidden, args.drug_out, args.n_layers_drug, args.dropout))
 print('Protein: protein_hidden={}, protein_out={}, n_layers={}, use_surface={}'.format(
     args.protein_hidden, args.protein_out, args.n_layers_protein, bool(args.use_surface)))
 print('Interaction: emb_dim={}, dropout={}, fp={}, p_global={}'.format(
-    args.emb_dim, args.dropout, bool(args.use_fingerprint), bool(args.use_p_global)))
+    args.emb_dim,  args.dropout, bool(args.use_fingerprint), bool(args.use_p_global)))
 
-name = f"0525_gmpcat"
+name = f"baseline_b{batch_size}" \
 
 # --- 单次训练 ---
 print(f'\nRunning on {model_st}_{dataset} with seed {seed}, strategy {strategy}')
@@ -224,6 +227,13 @@ scheduler = ReduceLROnPlateau(
     patience=args.lr_patience, min_lr=1e-6
 )
 
+# 线性warmup：前 warmup_epochs 个epoch学习率从 start_factor*LR 线性增长到 LR
+warmup_epochs = args.warmup_epochs
+if warmup_epochs > 0:
+    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=warmup_epochs)
+else:
+    warmup_scheduler = None
+
 best_mse = 1000
 best_ci = 0
 best_epoch = -1
@@ -247,6 +257,7 @@ for epoch in range(NUM_EPOCHS):
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
+            'warmup_scheduler_state_dict': warmup_scheduler.state_dict() if warmup_scheduler is not None else None,
             'best_mse': best_mse,
             'best_ci': best_ci,
             'val_metrics': val_ret,
@@ -282,7 +293,10 @@ for epoch in range(NUM_EPOCHS):
     else:
         print(f'Val MSE: {val_ret[1]} - No improvement since epoch {best_epoch}; best_mse:{best_mse}, best_ci:{best_ci}, best_rm2:{best_rm2}')
 
-    scheduler.step(val_ret[1])  # val_ret[1] = MSE
+    if warmup_scheduler is not None and epoch < warmup_epochs:
+        warmup_scheduler.step()
+    else:
+        scheduler.step(val_ret[1])  # val_ret[1] = MSE
     print(f"Epoch {epoch+1}, LR: {optimizer.param_groups[0]['lr']:.2e}")
     # 早停策略
     if epoch + 1 - best_epoch > EARLY_STOPPING_PATIENCE:
