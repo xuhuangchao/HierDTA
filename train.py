@@ -59,7 +59,6 @@ def parse_args():
     parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif AttentiveFP layers')
 
     parser.add_argument('--prot_in_dim', type=int, default=1152, help='ESMC residue feature dimension')
-    parser.add_argument('--esm_dim', type=int, default=1152, help='ESMC global feature dimension')
     parser.add_argument('--prot_num_layers', type=int, default=2, help='Protein GAT layers after the initial GCN')
     parser.add_argument('--fp_in_dim', type=int, default=1024, help='Fingerprint dimension')
     parser.add_argument('--run_name', type=str, default='hisurf_dta', help='Output filename suffix')
@@ -125,7 +124,6 @@ def build_model(args):
         atom_num_layers=args.atom_num_layers,
         motif_num_layers=args.motif_num_layers,
         prot_in_dim=args.prot_in_dim,
-        esm_dim=args.esm_dim,
         prot_num_layers=args.prot_num_layers,
         fp_in_dim=args.fp_in_dim,
     )

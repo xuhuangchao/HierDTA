@@ -93,7 +93,7 @@ class MLPDecoder(nn.Module):
 
 
 class DTAFusionHead(nn.Module):
-    """Concatenate the six graph, global, and surface views for prediction."""
+    """Concatenate the five graph, fingerprint, and surface views for prediction."""
 
     def __init__(
         self,
@@ -101,7 +101,6 @@ class DTAFusionHead(nn.Module):
         num_tasks: int = 1,
         dropout: float = 0.2,
         fp_in_dim: int = 1024,
-        esm_dim: int = 1152,
     ):
         super().__init__()
         self.fp_proj = nn.Sequential(
@@ -110,14 +109,8 @@ class DTAFusionHead(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(512, d),
         )
-        self.esm_proj = nn.Sequential(
-            nn.Linear(esm_dim, 512),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(512, d),
-        )
         self.mlp = MLPDecoder(
-            in_dim=6 * d,
+            in_dim=5 * d,
             hidden_dim1=512,
             hidden_dim2=256,
             binary=num_tasks,
@@ -126,32 +119,27 @@ class DTAFusionHead(nn.Module):
 
     def forward(
         self,
-        atom_molout: Tensor,
-        motif_molout: Tensor,
+        atom_mol_out: Tensor,
+        motif_mol_out: Tensor,
         protein_out: Tensor,
-        esm_global: Tensor,
         fingerprint: Tensor,
         surface: Tensor,
     ) -> Tensor:
-        if esm_global.dim() == 3:
-            esm_global = esm_global.squeeze(1)
         if fingerprint.dim() == 3:
             fingerprint = fingerprint.squeeze(1)
 
         drug = self.fp_proj(fingerprint)
-        protein = self.esm_proj(esm_global)
         return self.mlp(torch.cat([
-            atom_molout,
-            motif_molout,
+            atom_mol_out,
+            motif_mol_out,
             drug,
             protein_out,
-            protein,
             surface,
         ], dim=-1))
 
 
 class DTAModel(nn.Module):
-    """DTA model that concatenates six independent molecular and protein views."""
+    """DTA model that concatenates five molecular and protein views."""
 
     def __init__(
         self,
@@ -166,7 +154,6 @@ class DTAModel(nn.Module):
         atom_num_layers: int = 3,
         motif_num_layers: int = 2,
         prot_in_dim: int = 1152,
-        esm_dim: int = 1152,
         prot_num_layers: int = 4,
         fp_in_dim: int = 1024,
     ):
@@ -198,18 +185,16 @@ class DTAModel(nn.Module):
             num_tasks=num_tasks,
             dropout=dropout,
             fp_in_dim=fp_in_dim,
-            esm_dim=esm_dim,
         )
 
     def forward(self, data: DTABatch) -> Tensor:
-        atom_molout, motif_molout = self.encode_drug(data)
+        atom_mol_out, motif_mol_out = self.encode_drug(data)
         protein_out = self.encode_protein(data)
         surface = self.surface_encoder(data.surface_embedding, data.surface_mask)
         return self.fusion_head(
-            atom_molout=atom_molout,
-            motif_molout=motif_molout,
+            atom_mol_out=atom_mol_out,
+            motif_mol_out=motif_mol_out,
             protein_out=protein_out,
-            esm_global=data.esm_global,
             fingerprint=data.fingerprint,
             surface=surface,
         )

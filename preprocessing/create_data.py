@@ -14,7 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from chemutils import build_himgnn_mol_hetero_dict
+from preprocessing.chemutils import build_himgnn_mol_hetero_dict
 
 
 ECFP_DIM = 1024

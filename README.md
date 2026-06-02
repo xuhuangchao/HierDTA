@@ -2,7 +2,7 @@
 
 **HiSurf-DTA: Hierarchical Molecular and Surface-aware Protein Representation Learning for Drug-Target Affinity Prediction**
 
-HiSurf-DTA is a multi-view drug-target affinity prediction framework. It combines hierarchical molecular graphs with protein language-model representations, residue contact graphs, and pocket surface features. The current implementation concatenates six complementary vectors before affinity regression, providing a clear baseline for subsequent interaction-module design.
+HiSurf-DTA is a multi-view drug-target affinity prediction framework. It combines hierarchical molecular graphs with protein language-model-guided residue contact graphs and pocket surface features. The current implementation concatenates five complementary vectors before affinity regression, providing a clear baseline for subsequent interaction-module design.
 
 ## Key Contributions
 
@@ -10,21 +10,20 @@ HiSurf-DTA is a multi-view drug-target affinity prediction framework. It combine
 2. **Language-model-guided protein graph encoding.** ESM-C residue embeddings are used as node features, while ESM2 contact probabilities define weighted
    residue edges. A `GCNConv` and `GATConv` stack aggregates structural and sequence-aware protein information.
 3. **Independent pocket surface modeling.** Up to 512 dMaSIF surface point embeddings describe the local pocket environment without requiring a potentially noisy residue-to-surface mapping. A mask excludes padded points when short pockets are batched.
-4. **Complementary global and local protein views.** The model combines the residue contact graph, the global ESM-C embedding, and the dMaSIF pocket surface representation.
+4. **Complementary protein views.** The model combines the residue contact graph and the dMaSIF pocket surface representation.
 
 ## Model Overview
 
-The prediction head receives six vectors:
+The prediction head receives five vectors:
 
-1. `atom_molout`: atom-level molecular graph encoded by PyG `AttentiveFP`.
-2. `motif_molout`: motif-level molecular graph encoded by PyG `AttentiveFP`.
+1. `atom_mol_out`: atom-level molecular graph encoded by PyG `AttentiveFP`.
+2. `motif_mol_out`: motif-level molecular graph encoded by PyG `AttentiveFP`.
 3. `fp_proj`: projected Morgan fingerprint.
 4. `protein_out`: ESM-C residue contact graph encoded by `GCNConv`, `GATConv`,
    `BatchNorm1d`, and `global_mean_pool`.
-5. `esm_proj`: projected global ESM-C protein representation.
-6. `surface`: attention-pooled dMaSIF pocket surface representation.
+5. `surface`: attention-pooled dMaSIF pocket surface representation.
 
-The six vectors are concatenated and passed to an MLP regression head.
+The five vectors are concatenated and passed to an MLP regression head.
 
 ## Data Layout
 

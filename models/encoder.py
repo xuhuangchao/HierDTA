@@ -48,13 +48,13 @@ class HeteroMolGNN(nn.Module):
         aa_ea = data["atom", "bond", "atom"].edge_attr
         mm_ei = data["motif", "connects", "motif"].edge_index
         mm_ea = data["motif", "connects", "motif"].edge_attr
-        atom_molout = self.atom_encoder(
+        atom_mol_out = self.atom_encoder(
             data["atom"].x, aa_ei, aa_ea, data["atom"].batch
         )
-        motif_molout = self.motif_encoder(
+        motif_mol_out = self.motif_encoder(
             data["motif"].x, mm_ei, mm_ea, data["motif"].batch
         )
-        return atom_molout, motif_molout
+        return atom_mol_out, motif_mol_out
 
 
 class ProteinGraphEncoder(nn.Module):
@@ -71,20 +71,15 @@ class ProteinGraphEncoder(nn.Module):
         if num_layers < 1:
             raise ValueError("num_layers must be at least 1")
 
-        self.gcn = GCNConv(prot_in_dim, hidden_dim)
+        self.gcn = GCNConv(in_channels=prot_in_dim, out_channels=hidden_dim)
         self.gcn_bn = nn.BatchNorm1d(hidden_dim)
         self.gat_layers = nn.ModuleList([
-            GATConv(hidden_dim, hidden_dim)
+            GATConv(in_channels=hidden_dim, out_channels=hidden_dim, dropout=dropout)
             for _ in range(num_layers)
         ])
         self.gat_bns = nn.ModuleList([
             nn.BatchNorm1d(hidden_dim) for _ in range(num_layers)
         ])
-        self.output_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.fc1 = nn.Linear(hidden_dim, 1024)
-        self.fc2 = nn.Linear(1024, 256)
-        self.out = nn.Linear(256, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
 
     def forward(
         self,
@@ -100,11 +95,8 @@ class ProteinGraphEncoder(nn.Module):
             h = F.relu(gat(h, edge_index))
             h = batch_norm(h)
         # Keep ProteinGraphNet's post-pooling MLP while returning a fusion embedding.
-        h = F.relu(self.output_proj(global_mean_pool(h, batch)))
-        h = self.dropout(h)
-        h = self.dropout(F.relu(self.fc1(h)))
-        h = self.dropout(F.relu(self.fc2(h)))
-        return self.out(h)
+        h = global_mean_pool(h, batch)
+        return h
 
 
 class SurfaceEncoder(nn.Module):
