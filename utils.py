@@ -7,27 +7,42 @@ from torch_geometric.loader import DataLoader
 from torch_geometric import data as DATA
 import torch
 
+
+def load_global_features(dataset_name, cache_dir='data/cache'):
+    """Load dataset-wide drug and protein caches once for sharing across splits."""
+    print(f'Loading global caches from {cache_dir} for dataset {dataset_name}...')
+    drug_features = torch.load(
+        f'{cache_dir}/{dataset_name}_drug_features.pt', weights_only=False
+    )
+    protein_features = torch.load(
+        f'{cache_dir}/{dataset_name}_protein_features.pt', weights_only=False
+    )
+    print('Global caches loaded.')
+    return drug_features, protein_features
+
+
 class TestbedDatasetHMol(Dataset):
     def __init__(self, xd=None, xt=None, y=None, transform=None,
-                 dataset_name=None, cache_dir='data/cache', surface_k=5):
+                 dataset_name=None, cache_dir='data/cache',
+                 drug_features=None, protein_features=None):
         self.xd = xd
         self.xt = xt
         self.y = y
         self.dataset_name = dataset_name
         self.cache_dir = cache_dir
-        self.surface_k = surface_k
         self.transform = transform
 
         assert (self.xd is not None and self.xt is not None and self.y is not None), "The three lists must be the same length!"
         assert self.dataset_name is not None, "Must provide dataset_name"
 
-        # 从全局 cache 加载（与 seed/strategy 无关）
-        print(f'Loading global caches from {self.cache_dir} for dataset {self.dataset_name} (surface_k={self.surface_k})...')
-        self.smile_graph = torch.load(f'{self.cache_dir}/{self.dataset_name}_smile_graph.pt', weights_only=False)
-        self.fingerprint = torch.load(f'{self.cache_dir}/{self.dataset_name}_fingerprint.pt', weights_only=False)
-        self.pocket_graph = torch.load(f'{self.cache_dir}/{self.dataset_name}_protein_graphs_k{self.surface_k}.pt', weights_only=False)
-        self.esm_feats = torch.load(f'{self.cache_dir}/{self.dataset_name}_esm_feats.pt', weights_only=False)
-        print('Cache loaded. Assembling data pairs...')
+        # Reuse dataset-wide caches across train/valid/test when provided.
+        if drug_features is None or protein_features is None:
+            drug_features, protein_features = load_global_features(
+                self.dataset_name, self.cache_dir
+            )
+        self.drug_features = drug_features
+        self.protein_features = protein_features
+        print('Assembling data pairs...')
 
         self.data_list = []
         data_len = len(self.xd)
@@ -39,39 +54,43 @@ class TestbedDatasetHMol(Dataset):
             key = self.xt[i]
             labels = self.y[i]
 
-            # Process drug data
-            smile_data = self.smile_graph[smiles]
+            # Process drug data — build from heterogeneous molecular graph cache
+            drug_data = self.drug_features[smiles]
+            hg = drug_data['hetero_graph']
 
-            drug_graph = DATA.Data(
-                x=torch.FloatTensor(smile_data["x"]),
-                edge_index=torch.LongTensor(smile_data["edge_index"]),
-                edge_attr=torch.LongTensor(smile_data["edge_attr"]),
-            )
+            # Full heterogeneous graph
+            hetero = DATA.HeteroData()
+            hetero['atom'].x = torch.FloatTensor(hg['x_atom'])
+            hetero['motif'].x = torch.FloatTensor(hg['x_motif'])
 
-            drug_graph.c_size = torch.LongTensor([smile_data["num_part"]])
-            drug_graph.smiles = smiles
-            drug_graph.fingerprint = torch.FloatTensor([self.fingerprint[smiles]])
+            hetero['atom', 'bond', 'atom'].edge_index = torch.LongTensor(hg['aa_edge_index'])
+            hetero['atom', 'bond', 'atom'].edge_attr = torch.FloatTensor(hg['aa_edge_attr'])
 
-            # Process protein data
-            pocket_data = self.pocket_graph[key]
+            hetero['atom', 'in', 'motif'].edge_index = torch.LongTensor(hg['am_edge_index'])
+            # Kept for backward compatibility with existing caches. The
+            # independent dual-graph encoder does not consume atom-motif edges.
+            hetero['atom', 'in', 'motif'].edge_attr = torch.FloatTensor(hg['am_edge_attr'])
 
-            node_features = torch.Tensor(pocket_data[1])
-            edge_index_protein = torch.LongTensor(pocket_data[2])
-            residue_coords = torch.FloatTensor(pocket_data[3])
+            hetero['motif', 'connects', 'motif'].edge_index = torch.LongTensor(hg['mm_edge_index'])
+            hetero['motif', 'connects', 'motif'].edge_attr = torch.FloatTensor(hg['mm_edge_attr'])
+
+            # Full-length ESMC contact graph and independent dMaSIF surface view.
+            protein_data = self.protein_features[key]
 
             protein_graph = DATA.Data(
-                x=node_features,
-                edge_index=edge_index_protein,
-                pos=residue_coords
+                x=torch.FloatTensor(protein_data['x']),
+                edge_index=torch.LongTensor(protein_data['edge_index']),
+                edge_weight=torch.FloatTensor(protein_data['edge_weight']),
             )
 
-            protein_graph.key = key
-            target_features = self.esm_feats[key]
-            protein_graph.target_features = torch.FloatTensor([target_features])
-
             data = DATA.Data(
-                drug_graph=drug_graph,
+                hetero=hetero,
                 protein_graph=protein_graph,
+                surface_embedding=protein_data['surface_embedding'].float(),
+                fingerprint=torch.FloatTensor([drug_data['fingerprint']]),
+                esm_global=torch.FloatTensor([protein_data['esm_global']]),
+                smiles=smiles,
+                key=key,
                 y=torch.FloatTensor([labels]),
             )
             self.data_list.append(data)

@@ -7,10 +7,21 @@ from collections import defaultdict
 
 
 METRICS = ['RMSE', 'MSE', 'Pearson', 'CI', 'RM2']
+METRIC_ALIASES = {
+    'rmse': 'RMSE',
+    'mse': 'MSE',
+    'pearson': 'Pearson',
+    'ci': 'CI',
+    'rm2': 'RM2',
+}
 
 
-def parse_result_file(filepath):
-    """Parse a single result CSV file containing one line of comma-separated metrics."""
+def normalize_metric_name(name):
+    key = str(name).strip().lower()
+    return METRIC_ALIASES.get(key)
+
+
+def parse_plain_metric_line(filepath):
     with open(filepath, 'r') as f:
         line = f.read().strip()
     if not line:
@@ -25,15 +36,84 @@ def parse_result_file(filepath):
     return values
 
 
+def parse_dataframe_metrics(filepath):
+    df = pd.read_csv(filepath)
+    if df.empty:
+        return None
+
+    column_map = {}
+    for col in df.columns:
+        metric = normalize_metric_name(col)
+        if metric is not None:
+            column_map[metric] = col
+
+    # Current train.py format: one row with columns rmse,mse,pearson,ci,rm2.
+    if column_map:
+        row = df.iloc[0]
+        values = []
+        for metric in METRICS:
+            col = column_map.get(metric)
+            if col is None:
+                print(f"Warning: Missing metric column {metric} in {filepath}")
+                return None
+            values.append(float(row[col]))
+        return values
+
+    # Also support metric/value style CSV files.
+    lower_cols = {str(col).strip().lower(): col for col in df.columns}
+    metric_col = lower_cols.get('metric') or lower_cols.get('name')
+    value_col = lower_cols.get('value') or lower_cols.get('score')
+    if metric_col is not None and value_col is not None:
+        values_by_metric = {}
+        for _, row in df.iterrows():
+            metric = normalize_metric_name(row[metric_col])
+            if metric is not None:
+                values_by_metric[metric] = float(row[value_col])
+        if values_by_metric:
+            values = []
+            for metric in METRICS:
+                if metric not in values_by_metric:
+                    print(f"Warning: Missing metric {metric} in {filepath}")
+                    return None
+                values.append(values_by_metric[metric])
+            return values
+
+    return None
+
+
+def parse_result_file(filepath):
+    """Parse a single result CSV file in either current headered or legacy plain format."""
+    try:
+        values = parse_dataframe_metrics(filepath)
+        if values is not None:
+            return values
+    except Exception:
+        pass
+
+    try:
+        return parse_plain_metric_line(filepath)
+    except ValueError:
+        print(f"Warning: Could not parse {filepath}")
+        return None
+
+
+def result_pattern(base_dir, strategy, suffix):
+    if not suffix:
+        return os.path.join(base_dir, strategy, 'seed_*', '*.csv')
+    name = suffix
+    if not name.endswith('.csv'):
+        name = f'{name}.csv'
+    if not name.startswith('result_'):
+        name = f'result_{name}'
+    return os.path.join(base_dir, strategy, 'seed_*', name)
+
+
 def summarize_results(base_dir, strategy, suffix=None, save_path=None):
     """
     Scan base_dir/strategy/seed_*/result_*.csv and compute mean/std across seeds.
     If suffix is provided, match exactly result_{suffix}.csv.
     """
-    if suffix:
-        pattern = os.path.join(base_dir, strategy, 'seed_*', f'result_HierDTA_{suffix}.csv')
-    else:
-        pattern = os.path.join(base_dir, strategy, 'seed_*', '*.csv')
+    pattern = result_pattern(base_dir, strategy, suffix)
     csv_files = glob.glob(pattern)
 
     if not csv_files:
@@ -110,11 +190,12 @@ def main():
     )
     parser.add_argument('--dataset', type=str, required=True,
                         help='Dataset name, e.g., kiba or davis')
-    parser.add_argument('--strategy', type=str, default='random',
-                        help='Split strategy (default: random)')
+    parser.add_argument('--strategy', type=str, default='warm',
+                        choices=['warm', 'unseen_drug', 'unseen_prot', 'unseen_pair'],
+                        help='Split strategy (default: warm)')
     parser.add_argument('--results_dir', type=str, default=None,
                         help='Base results directory. Auto-detected if not provided.')
-    parser.add_argument('--suffix', type=str, default="runseed_seed",
+    parser.add_argument('--suffix', type=str, default="dta_model",
                         help='Result filename suffix to match, e.g., runseed_seed. '
                              'If provided, matches exactly result_{suffix}.csv. '
                              'If omitted, matches all CSV files.')
@@ -143,7 +224,7 @@ def main():
 
     print(f"Scanning results in: {base_dir}/{args.strategy}/")
     if args.suffix:
-        print(f"Matching files: result_HierDTA_{args.suffix}.csv")
+        print(f"Matching files: result_{args.suffix}.csv")
     summarize_results(base_dir, args.strategy, suffix=args.suffix, save_path=args.save_csv)
 
 
