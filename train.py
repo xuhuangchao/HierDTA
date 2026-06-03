@@ -55,8 +55,8 @@ def parse_args():
     parser.add_argument('--motif_in_dim', type=int, default=50, help='Motif feature dimension')
     parser.add_argument('--aa_edge_dim', type=int, default=13, help='Atom-atom edge dimension')
     parser.add_argument('--mm_edge_dim', type=int, default=37, help='Motif-motif edge dimension')
-    parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom AttentiveFP layers')
-    parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif AttentiveFP layers')
+    parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom graph encoder layers')
+    parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif graph encoder layers')
 
     parser.add_argument('--prot_in_dim', type=int, default=1152, help='ESMC residue feature dimension')
     parser.add_argument('--prot_num_layers', type=int, default=2, help='Protein GAT layers after the initial GCN')

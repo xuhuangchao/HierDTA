@@ -7,8 +7,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import Batch, Data, HeteroData
+from torch_geometric.nn import global_mean_pool
+from torch_geometric.utils import to_dense_batch
 
 from .encoder import HeteroMolGNN, ProteinGraphEncoder, SurfaceEncoder
+from .fusion import (
+    Aggregation,
+    Interaction,
+)
 
 
 class DTABatch:
@@ -93,7 +99,7 @@ class MLPDecoder(nn.Module):
 
 
 class DTAFusionHead(nn.Module):
-    """Concatenate the five graph, fingerprint, and surface views for prediction."""
+    """Fuse local motif-residue interactions with compact global representations."""
 
     def __init__(
         self,
@@ -103,43 +109,98 @@ class DTAFusionHead(nn.Module):
         fp_in_dim: int = 1024,
     ):
         super().__init__()
+        self.atom_to_motif = Aggregation(d)
+        self.local_interaction = Interaction(
+            hidden_dim=d,
+            dropout=dropout,
+        )
         self.fp_proj = nn.Sequential(
-            nn.Linear(fp_in_dim, 512),
+            nn.Linear(fp_in_dim, d),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(512, d),
         )
-        self.mlp = MLPDecoder(
-            in_dim=5 * d,
-            hidden_dim1=512,
-            hidden_dim2=256,
+        self.drug_proj = nn.Sequential(
+            nn.Linear(2 * d, d),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.target_proj = nn.Sequential(
+            nn.Linear(2 * d, d),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.global_pair_proj = nn.Sequential(
+            nn.Linear(2 * d, d),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.local_proj = nn.Sequential(
+            nn.Linear(d, d),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.local_gate = nn.Linear(2 * d, d)
+        self.decoder = MLPDecoder(
+            in_dim=d,
+            hidden_dim1=2 * d,
+            hidden_dim2=d,
             binary=num_tasks,
             dropout=dropout,
         )
+        self.last_motif_residue_attention = None
+        self.last_motif_weight = None
+        self.last_local_gate = None
 
     def forward(
         self,
-        atom_mol_out: Tensor,
-        motif_mol_out: Tensor,
+        atom_tokens: Tensor,
+        motif_tokens: Tensor,
+        motif_batch: Tensor,
+        atom_to_motif_edge_index: Tensor,
         protein_out: Tensor,
+        residue_tokens: Tensor,
+        residue_batch: Tensor,
         fingerprint: Tensor,
         surface: Tensor,
     ) -> Tensor:
         if fingerprint.dim() == 3:
             fingerprint = fingerprint.squeeze(1)
 
-        drug = self.fp_proj(fingerprint)
-        return self.mlp(torch.cat([
-            atom_mol_out,
-            motif_mol_out,
-            drug,
-            protein_out,
-            surface,
+        motif_tokens = self.atom_to_motif(
+            atom_tokens=atom_tokens,
+            motif_tokens=motif_tokens,
+            atom_to_motif_edge_index=atom_to_motif_edge_index,
+        )
+        dense_motif, motif_mask = to_dense_batch(motif_tokens, motif_batch)
+        dense_residue, residue_mask = to_dense_batch(residue_tokens, residue_batch)
+        local, attention, motif_weight = self.local_interaction(
+            motif_tokens=dense_motif,
+            residue_tokens=dense_residue,
+            motif_mask=motif_mask,
+            residue_mask=residue_mask,
+        )
+        # Retain detached interaction weights for interpretation after inference.
+        self.last_motif_residue_attention = attention.detach()
+        self.last_motif_weight = motif_weight.detach()
+
+        enriched_motif_out = global_mean_pool(motif_tokens, motif_batch)
+        drug = self.drug_proj(torch.cat([
+            enriched_motif_out,
+            self.fp_proj(fingerprint),
         ], dim=-1))
+        target = self.target_proj(torch.cat([protein_out, surface], dim=-1))
+        global_pair = self.global_pair_proj(torch.cat([drug, target], dim=-1))
+        local_context = self.local_proj(local)
+        local_gate = torch.sigmoid(
+            self.local_gate(torch.cat([global_pair, local_context], dim=-1))
+        )
+        self.last_local_gate = local_gate.detach()
+        fused = global_pair + local_gate * local_context
+        return self.decoder(fused)
 
 
 class DTAModel(nn.Module):
-    """DTA model that concatenates five molecular and protein views."""
+    """DTA model with hierarchical global fusion and motif-residue interaction."""
 
     def __init__(
         self,
@@ -188,13 +249,19 @@ class DTAModel(nn.Module):
         )
 
     def forward(self, data: DTABatch) -> Tensor:
-        atom_mol_out, motif_mol_out = self.encode_drug(data)
-        protein_out = self.encode_protein(data)
+        atom_tokens, motif_tokens = self.encode_drug(data)
+        protein_out, residue_tokens = self.encode_protein(data)
         surface = self.surface_encoder(data.surface_embedding, data.surface_mask)
+        hetero = data.hetero
+        protein_graph = data.protein_graph
         return self.fusion_head(
-            atom_mol_out=atom_mol_out,
-            motif_mol_out=motif_mol_out,
+            atom_tokens=atom_tokens,
+            motif_tokens=motif_tokens,
+            motif_batch=hetero["motif"].batch,
+            atom_to_motif_edge_index=hetero["atom", "in", "motif"].edge_index,
             protein_out=protein_out,
+            residue_tokens=residue_tokens,
+            residue_batch=protein_graph.batch,
             fingerprint=data.fingerprint,
             surface=surface,
         )
@@ -213,6 +280,7 @@ class DTAModel(nn.Module):
             edge_index=graph.edge_index,
             edge_weight=graph.edge_weight,
             batch=graph.batch,
+            return_tokens=True,
         )
 
     def count_parameters(self) -> dict:

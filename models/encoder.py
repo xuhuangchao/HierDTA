@@ -6,7 +6,6 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import GATConv, GCNConv, global_mean_pool
-from torch_geometric.nn.models import AttentiveFP
 
 
 class HeteroMolGNN(nn.Module):
@@ -24,37 +23,69 @@ class HeteroMolGNN(nn.Module):
         dropout: float = 0.1,
     ):
         super().__init__()
-        self.atom_encoder = AttentiveFP(
-            in_channels=atom_in_dim,
-            hidden_channels=hidden_dim,
-            out_channels=hidden_dim,
+        self.atom_encoder = DrugGraphEncoder(
+            in_dim=atom_in_dim,
+            hidden_dim=hidden_dim,
             edge_dim=aa_edge_dim,
             num_layers=atom_num_layers,
-            num_timesteps=2,
             dropout=dropout,
         )
-        self.motif_encoder = AttentiveFP(
-            in_channels=motif_in_dim,
-            hidden_channels=hidden_dim,
-            out_channels=hidden_dim,
+        self.motif_encoder = DrugGraphEncoder(
+            in_dim=motif_in_dim,
+            hidden_dim=hidden_dim,
             edge_dim=mm_edge_dim,
             num_layers=motif_num_layers,
-            num_timesteps=2,
             dropout=dropout,
         )
 
-    def forward(self, data: HeteroData) -> tuple[Tensor, Tensor]:
+    def forward(
+        self,
+        data: HeteroData,
+    ) -> tuple[Tensor, Tensor]:
         aa_ei = data["atom", "bond", "atom"].edge_index
         aa_ea = data["atom", "bond", "atom"].edge_attr
         mm_ei = data["motif", "connects", "motif"].edge_index
         mm_ea = data["motif", "connects", "motif"].edge_attr
-        atom_mol_out = self.atom_encoder(
-            data["atom"].x, aa_ei, aa_ea, data["atom"].batch
-        )
-        motif_mol_out = self.motif_encoder(
-            data["motif"].x, mm_ei, mm_ea, data["motif"].batch
-        )
-        return atom_mol_out, motif_mol_out
+        atom_tokens = self.atom_encoder(data["atom"].x, aa_ei, aa_ea)
+        motif_tokens = self.motif_encoder(data["motif"].x, mm_ei, mm_ea)
+        return atom_tokens, motif_tokens
+
+
+class DrugGraphEncoder(nn.Module):
+    """Encode drug graph nodes for downstream interaction and pooling."""
+
+    def __init__(
+        self,
+        in_dim: int,
+        hidden_dim: int,
+        edge_dim: int,
+        num_layers: int,
+        dropout: float,
+    ):
+        super().__init__()
+        if num_layers < 1:
+            raise ValueError("num_layers must be at least 1")
+
+        self.input_proj = nn.Linear(in_dim, hidden_dim)
+        self.layers = nn.ModuleList([
+            GATConv(
+                in_channels=hidden_dim,
+                out_channels=hidden_dim,
+                edge_dim=edge_dim,
+                dropout=0.0,
+            )
+            for _ in range(num_layers)
+        ])
+        self.norms = nn.ModuleList([
+            nn.BatchNorm1d(hidden_dim) for _ in range(num_layers)
+        ])
+
+    def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor) -> Tensor:
+        h = F.relu(self.input_proj(x))
+        for layer, norm in zip(self.layers, self.norms):
+            update = F.relu(layer(h, edge_index, edge_attr=edge_attr))
+            h = norm(h + update)
+        return h
 
 
 class ProteinGraphEncoder(nn.Module):
@@ -87,7 +118,8 @@ class ProteinGraphEncoder(nn.Module):
         edge_index: Tensor,
         edge_weight: Tensor,
         batch: Tensor,
-    ) -> Tensor:
+        return_tokens: bool = False,
+    ):
         # Keep ProteinGraphNet ordering: weighted GCN, then unweighted GAT blocks.
         h = F.relu(self.gcn(x, edge_index, edge_weight=edge_weight))
         h = self.gcn_bn(h)
@@ -95,8 +127,11 @@ class ProteinGraphEncoder(nn.Module):
             h = F.relu(gat(h, edge_index))
             h = batch_norm(h)
         # Keep ProteinGraphNet's post-pooling MLP while returning a fusion embedding.
-        h = global_mean_pool(h, batch)
-        return h
+        residue_tokens = h
+        pooled = global_mean_pool(residue_tokens, batch)
+        if return_tokens:
+            return pooled, residue_tokens
+        return pooled
 
 
 class SurfaceEncoder(nn.Module):
@@ -111,9 +146,17 @@ class SurfaceEncoder(nn.Module):
         )
         self.score = nn.Linear(hidden_dim, 1)
 
-    def forward(self, surface_x: Tensor, surface_mask: Tensor) -> Tensor:
+    def forward(
+        self,
+        surface_x: Tensor,
+        surface_mask: Tensor,
+        return_tokens: bool = False,
+    ):
         h = self.proj(surface_x)
         scores = self.score(h).squeeze(-1)
         scores = scores.masked_fill(~surface_mask, float("-inf"))
         weights = torch.softmax(scores, dim=-1)
-        return torch.sum(h * weights.unsqueeze(-1), dim=1)
+        pooled = torch.sum(h * weights.unsqueeze(-1), dim=1)
+        if return_tokens:
+            return pooled, h
+        return pooled

@@ -2,7 +2,7 @@
 
 **HiSurf-DTA: Hierarchical Molecular and Surface-aware Protein Representation Learning for Drug-Target Affinity Prediction**
 
-HiSurf-DTA is a multi-view drug-target affinity prediction framework. It combines hierarchical molecular graphs with protein language-model-guided residue contact graphs and pocket surface features. The current implementation concatenates five complementary vectors before affinity regression, providing a clear baseline for subsequent interaction-module design.
+HiSurf-DTA is a multi-view drug-target affinity prediction framework. It combines hierarchical molecular graphs with protein language-model-guided residue contact graphs and pocket surface features. The current implementation learns motif-residue interactions and fuses them with compact drug and target representations before affinity regression.
 
 ## Key Contributions
 
@@ -14,16 +14,21 @@ HiSurf-DTA is a multi-view drug-target affinity prediction framework. It combine
 
 ## Model Overview
 
-The prediction head receives five vectors:
+Atom and motif graphs are encoded by edge-aware `GATConv` stacks with
+`BatchNorm1d`. Mean pooling produces graph-level molecular views, while
+parameter-free atom-to-motif mean aggregation enriches motif tokens with fine-grained chemical
+context.
 
-1. `atom_mol_out`: atom-level molecular graph encoded by PyG `AttentiveFP`.
-2. `motif_mol_out`: motif-level molecular graph encoded by PyG `AttentiveFP`.
-3. `fp_proj`: projected Morgan fingerprint.
-4. `protein_out`: ESM-C residue contact graph encoded by `GCNConv`, `GATConv`,
-   `BatchNorm1d`, and `global_mean_pool`.
-5. `surface`: attention-pooled dMaSIF pocket surface representation.
+A hidden-dimensional bilinear attention module learns motif-residue interaction weights. The
+prediction head receives three compact vectors:
 
-The five vectors are concatenated and passed to an MLP regression head.
+1. `local`: pooled motif-residue interaction representation.
+2. `drug`: concatenated enriched motif and projected Morgan fingerprint views.
+3. `target`: concatenated residue contact-graph and attention-pooled dMaSIF pocket views.
+
+The global `drug-target` pair is the main prediction path. The motif-residue
+interaction vector is projected and added through a lightweight local gate,
+then a single MLP decoder predicts affinity.
 
 ## Data Layout
 
