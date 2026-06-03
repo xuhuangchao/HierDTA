@@ -12,7 +12,6 @@ from torch_geometric.utils import to_dense_batch
 
 from .encoder import HeteroMolGNN, ProteinGraphEncoder, SurfaceEncoder
 from .fusion import (
-    Aggregation,
     Interaction,
 )
 
@@ -109,7 +108,6 @@ class DTAFusionHead(nn.Module):
         fp_in_dim: int = 1024,
     ):
         super().__init__()
-        self.atom_to_motif = Aggregation(d)
         self.local_interaction = Interaction(
             hidden_dim=d,
             dropout=dropout,
@@ -153,10 +151,8 @@ class DTAFusionHead(nn.Module):
 
     def forward(
         self,
-        atom_tokens: Tensor,
         motif_tokens: Tensor,
         motif_batch: Tensor,
-        atom_to_motif_edge_index: Tensor,
         protein_out: Tensor,
         residue_tokens: Tensor,
         residue_batch: Tensor,
@@ -166,11 +162,6 @@ class DTAFusionHead(nn.Module):
         if fingerprint.dim() == 3:
             fingerprint = fingerprint.squeeze(1)
 
-        motif_tokens = self.atom_to_motif(
-            atom_tokens=atom_tokens,
-            motif_tokens=motif_tokens,
-            atom_to_motif_edge_index=atom_to_motif_edge_index,
-        )
         dense_motif, motif_mask = to_dense_batch(motif_tokens, motif_batch)
         dense_residue, residue_mask = to_dense_batch(residue_tokens, residue_batch)
         local, attention, motif_weight = self.local_interaction(
@@ -212,10 +203,10 @@ class DTAModel(nn.Module):
         motif_in_dim: int = 50,
         aa_edge_dim: int = 13,
         mm_edge_dim: int = 37,
-        atom_num_layers: int = 3,
+        atom_num_layers: int = 2,
         motif_num_layers: int = 2,
         prot_in_dim: int = 1152,
-        prot_num_layers: int = 4,
+        prot_num_layers: int = 2,
         fp_in_dim: int = 1024,
     ):
         super().__init__()
@@ -249,16 +240,14 @@ class DTAModel(nn.Module):
         )
 
     def forward(self, data: DTABatch) -> Tensor:
-        atom_tokens, motif_tokens = self.encode_drug(data)
+        _atom_tokens, motif_tokens = self.encode_drug(data)
         protein_out, residue_tokens = self.encode_protein(data)
         surface = self.surface_encoder(data.surface_embedding, data.surface_mask)
         hetero = data.hetero
         protein_graph = data.protein_graph
         return self.fusion_head(
-            atom_tokens=atom_tokens,
             motif_tokens=motif_tokens,
             motif_batch=hetero["motif"].batch,
-            atom_to_motif_edge_index=hetero["atom", "in", "motif"].edge_index,
             protein_out=protein_out,
             residue_tokens=residue_tokens,
             residue_batch=protein_graph.batch,

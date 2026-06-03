@@ -6,37 +6,54 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import GATConv, GCNConv, global_mean_pool
+from torch_geometric.utils import scatter
 
 
 class HeteroMolGNN(nn.Module):
-    """Encode fine-grained atom tokens and coarse-grained motif tokens."""
+    """Encode atom and motif graphs with per-layer atom-to-motif interaction."""
 
     def __init__(
         self,
         atom_in_dim: int = 37,
         motif_in_dim: int = 50,
         hidden_dim: int = 256,
-        atom_num_layers: int = 3,
+        atom_num_layers: int = 2,
         motif_num_layers: int = 2,
         aa_edge_dim: int = 13,
         mm_edge_dim: int = 37,
         dropout: float = 0.1,
     ):
         super().__init__()
-        self.atom_encoder = DrugGraphEncoder(
-            in_dim=atom_in_dim,
-            hidden_dim=hidden_dim,
-            edge_dim=aa_edge_dim,
-            num_layers=atom_num_layers,
-            dropout=dropout,
-        )
-        self.motif_encoder = DrugGraphEncoder(
-            in_dim=motif_in_dim,
-            hidden_dim=hidden_dim,
-            edge_dim=mm_edge_dim,
-            num_layers=motif_num_layers,
-            dropout=dropout,
-        )
+        if atom_num_layers != motif_num_layers:
+            raise ValueError(
+                "atom_num_layers and motif_num_layers must be equal for "
+                "per-layer atom-to-motif interaction"
+            )
+        if atom_num_layers < 1:
+            raise ValueError("num_layers must be at least 1")
+
+        self.atom_input_proj = nn.Linear(atom_in_dim, hidden_dim)
+        self.motif_input_proj = nn.Linear(motif_in_dim, hidden_dim)
+        self.atom_blocks = nn.ModuleList([
+            GATBlock(
+                hidden_dim=hidden_dim,
+                edge_dim=aa_edge_dim,
+                dropout=dropout,
+            )
+            for _ in range(atom_num_layers)
+        ])
+        self.motif_blocks = nn.ModuleList([
+            GATBlock(
+                hidden_dim=hidden_dim,
+                edge_dim=mm_edge_dim,
+                dropout=dropout,
+            )
+            for _ in range(motif_num_layers)
+        ])
+        self.cross_blocks = nn.ModuleList([
+            AtomToMotifFusion(hidden_dim=hidden_dim, dropout=dropout)
+            for _ in range(atom_num_layers)
+        ])
 
     def forward(
         self,
@@ -44,11 +61,68 @@ class HeteroMolGNN(nn.Module):
     ) -> tuple[Tensor, Tensor]:
         aa_ei = data["atom", "bond", "atom"].edge_index
         aa_ea = data["atom", "bond", "atom"].edge_attr
+        am_ei = data["atom", "in", "motif"].edge_index
         mm_ei = data["motif", "connects", "motif"].edge_index
         mm_ea = data["motif", "connects", "motif"].edge_attr
-        atom_tokens = self.atom_encoder(data["atom"].x, aa_ei, aa_ea)
-        motif_tokens = self.motif_encoder(data["motif"].x, mm_ei, mm_ea)
-        return atom_tokens, motif_tokens
+
+        atom_h = F.relu(self.atom_input_proj(data["atom"].x))
+        motif_h = F.relu(self.motif_input_proj(data["motif"].x))
+        for atom_block, motif_block, cross_block in zip(
+            self.atom_blocks,
+            self.motif_blocks,
+            self.cross_blocks,
+        ):
+            atom_h = atom_block(atom_h, aa_ei, aa_ea)
+            motif_h = motif_block(motif_h, mm_ei, mm_ea)
+            motif_h = cross_block(atom_h, motif_h, am_ei)
+        return atom_h, motif_h
+
+
+class GATBlock(nn.Module):
+    """Residual edge-aware GAT update used by atom and motif graphs."""
+
+    def __init__(self, hidden_dim: int, edge_dim: int, dropout: float):
+        super().__init__()
+        self.conv = GATConv(
+            in_channels=hidden_dim,
+            out_channels=hidden_dim,
+            edge_dim=edge_dim,
+            dropout=dropout,
+        )
+        self.norm = nn.BatchNorm1d(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, h: Tensor, edge_index: Tensor, edge_attr: Tensor) -> Tensor:
+        update = F.relu(self.conv(h, edge_index, edge_attr=edge_attr))
+        update = self.dropout(update)
+        return self.norm(h + update)
+
+
+class AtomToMotifFusion(nn.Module):
+    """Inject mean-pooled atom states into motif states."""
+
+    def __init__(self, hidden_dim: int, dropout: float):
+        super().__init__()
+        self.norm = nn.BatchNorm1d(hidden_dim)
+
+    def forward(
+        self,
+        atom_h: Tensor,
+        motif_h: Tensor,
+        atom_to_motif_edge_index: Tensor,
+    ) -> Tensor:
+        atom_index, motif_index = atom_to_motif_edge_index
+        if atom_index.numel() == 0:
+            return motif_h
+
+        atom_context = scatter(
+            atom_h[atom_index],
+            motif_index,
+            dim=0,
+            dim_size=motif_h.size(0),
+            reduce="mean",
+        )
+        return self.norm(motif_h + atom_context)
 
 
 class DrugGraphEncoder(nn.Module):
