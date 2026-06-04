@@ -40,9 +40,9 @@ def parse_args():
     parser.add_argument('--split_root', type=str, default='data', help='Split csv root')
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
 
-    parser.add_argument('--epochs', type=int, default=250, help='Max training epochs')
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
-    parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate')
+    parser.add_argument('--epochs', type=int, default=300, help='Max training epochs')
+    parser.add_argument('--batch_size', type=int, default=64, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Learning rate')
     parser.add_argument('--patience', type=int, default=30, help='Early stopping patience')
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     parser.add_argument('--log_interval', type=int, default=20, help='Training log interval')
@@ -53,14 +53,15 @@ def parse_args():
 
     parser.add_argument('--atom_in_dim', type=int, default=37, help='Atom feature dimension')
     parser.add_argument('--motif_in_dim', type=int, default=50, help='Motif feature dimension')
-    parser.add_argument('--aa_edge_dim', type=int, default=13, help='Atom-atom edge dimension')
-    parser.add_argument('--mm_edge_dim', type=int, default=37, help='Motif-motif edge dimension')
-    parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom graph encoder layers')
-    parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif graph encoder layers')
+    parser.add_argument('--atom_edge_dim', type=int, default=13, help='Atom bond edge feature dimension')
+    parser.add_argument('--motif_edge_dim', type=int, default=37, help='Motif edge feature dimension')
+    parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom AttentiveFP message passing layers')
+    parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif AttentiveFP message passing layers')
 
     parser.add_argument('--prot_in_dim', type=int, default=1152, help='ESMC residue feature dimension')
-    parser.add_argument('--prot_num_layers', type=int, default=2, help='Protein GAT layers after the initial GCN')
+    parser.add_argument('--prot_num_layers', type=int, default=4, help='Protein GAT layers after the initial GCN')
     parser.add_argument('--fp_in_dim', type=int, default=1024, help='Fingerprint dimension')
+    parser.add_argument('--esm_global_in_dim', type=int, default=1152, help='ESMC global feature dimension')
     parser.add_argument('--run_name', type=str, default='hisurf_dta', help='Output filename suffix')
 
     return parser.parse_args()
@@ -119,13 +120,14 @@ def build_model(args):
         dropout=args.dropout,
         atom_in_dim=args.atom_in_dim,
         motif_in_dim=args.motif_in_dim,
-        aa_edge_dim=args.aa_edge_dim,
-        mm_edge_dim=args.mm_edge_dim,
+        atom_edge_dim=args.atom_edge_dim,
+        motif_edge_dim=args.motif_edge_dim,
         atom_num_layers=args.atom_num_layers,
         motif_num_layers=args.motif_num_layers,
         prot_in_dim=args.prot_in_dim,
         prot_num_layers=args.prot_num_layers,
         fp_in_dim=args.fp_in_dim,
+        esm_global_in_dim=args.esm_global_in_dim,
     )
 
 
@@ -207,7 +209,8 @@ def main():
     print(f'Device: {device}')
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
     print(f'Hidden dim: {args.hidden_dim}, dropout: {args.dropout}')
-    print('Protein encoder: ESMC contact graph GCN-GAT')
+    print('Drug encoder: atom/motif AttentiveFP, 2 layers by default')
+    print('Protein encoder: ESMC contact graph GCN-GAT, 4 GAT layers by default')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = build_model(args).to(device)

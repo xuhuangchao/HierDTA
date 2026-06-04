@@ -5,134 +5,72 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import GATConv, GCNConv, global_mean_pool
-from torch_geometric.utils import scatter
+from torch_geometric.nn import AttentiveFP, GATConv, GCNConv, global_add_pool
 
 
 class HeteroMolGNN(nn.Module):
-    """Encode atom and motif graphs with per-layer atom-to-motif interaction."""
+    """Read atom and motif molecular graphs with AttentiveFP."""
 
     def __init__(
         self,
         atom_in_dim: int = 37,
         motif_in_dim: int = 50,
+        atom_edge_dim: int = 13,
+        motif_edge_dim: int = 37,
         hidden_dim: int = 256,
         atom_num_layers: int = 2,
         motif_num_layers: int = 2,
-        aa_edge_dim: int = 13,
-        mm_edge_dim: int = 37,
+        atom_num_timesteps: int = 2,
+        motif_num_timesteps: int = 2,
         dropout: float = 0.1,
     ):
         super().__init__()
-        if atom_num_layers != motif_num_layers:
-            raise ValueError(
-                "atom_num_layers and motif_num_layers must be equal for "
-                "per-layer atom-to-motif interaction"
-            )
-        if atom_num_layers < 1:
-            raise ValueError("num_layers must be at least 1")
-
-        self.atom_input_proj = nn.Linear(atom_in_dim, hidden_dim)
-        self.motif_input_proj = nn.Linear(motif_in_dim, hidden_dim)
-        self.atom_blocks = nn.ModuleList([
-            GATBlock(
-                hidden_dim=hidden_dim,
-                edge_dim=aa_edge_dim,
-                dropout=dropout,
-            )
-            for _ in range(atom_num_layers)
-        ])
-        self.motif_blocks = nn.ModuleList([
-            GATBlock(
-                hidden_dim=hidden_dim,
-                edge_dim=mm_edge_dim,
-                dropout=dropout,
-            )
-            for _ in range(motif_num_layers)
-        ])
-        self.cross_blocks = nn.ModuleList([
-            AtomToMotifFusion(hidden_dim=hidden_dim, dropout=dropout)
-            for _ in range(atom_num_layers)
-        ])
+        self.atom_encoder = AttentiveFP(
+            in_channels=atom_in_dim,
+            hidden_channels=hidden_dim,
+            out_channels=hidden_dim,
+            edge_dim=atom_edge_dim,
+            num_layers=atom_num_layers,
+            num_timesteps=atom_num_timesteps,
+            dropout=dropout,
+        )
+        self.motif_encoder = AttentiveFP(
+            in_channels=motif_in_dim,
+            hidden_channels=hidden_dim,
+            out_channels=hidden_dim,
+            edge_dim=motif_edge_dim,
+            num_layers=motif_num_layers,
+            num_timesteps=motif_num_timesteps,
+            dropout=dropout,
+        )
 
     def forward(
         self,
         data: HeteroData,
     ) -> tuple[Tensor, Tensor]:
-        aa_ei = data["atom", "bond", "atom"].edge_index
-        aa_ea = data["atom", "bond", "atom"].edge_attr
-        am_ei = data["atom", "in", "motif"].edge_index
-        mm_ei = data["motif", "connects", "motif"].edge_index
-        mm_ea = data["motif", "connects", "motif"].edge_attr
-
-        atom_h = F.relu(self.atom_input_proj(data["atom"].x))
-        motif_h = F.relu(self.motif_input_proj(data["motif"].x))
-        for atom_block, motif_block, cross_block in zip(
-            self.atom_blocks,
-            self.motif_blocks,
-            self.cross_blocks,
-        ):
-            atom_h = atom_block(atom_h, aa_ei, aa_ea)
-            motif_h = motif_block(motif_h, mm_ei, mm_ea)
-            motif_h = cross_block(atom_h, motif_h, am_ei)
-        return atom_h, motif_h
-
-
-class GATBlock(nn.Module):
-    """Residual edge-aware GAT update used by atom and motif graphs."""
-
-    def __init__(self, hidden_dim: int, edge_dim: int, dropout: float):
-        super().__init__()
-        self.conv = GATConv(
-            in_channels=hidden_dim,
-            out_channels=hidden_dim,
-            edge_dim=edge_dim,
-            dropout=dropout,
+        atom_out = self.atom_encoder(
+            x=data["atom"].x,
+            edge_index=data["atom", "bond", "atom"].edge_index,
+            edge_attr=data["atom", "bond", "atom"].edge_attr,
+            batch=data["atom"].batch,
         )
-        self.norm = nn.BatchNorm1d(hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, h: Tensor, edge_index: Tensor, edge_attr: Tensor) -> Tensor:
-        update = F.relu(self.conv(h, edge_index, edge_attr=edge_attr))
-        update = self.dropout(update)
-        return self.norm(h + update)
-
-
-class AtomToMotifFusion(nn.Module):
-    """Inject mean-pooled atom states into motif states."""
-
-    def __init__(self, hidden_dim: int, dropout: float):
-        super().__init__()
-        self.norm = nn.BatchNorm1d(hidden_dim)
-
-    def forward(
-        self,
-        atom_h: Tensor,
-        motif_h: Tensor,
-        atom_to_motif_edge_index: Tensor,
-    ) -> Tensor:
-        atom_index, motif_index = atom_to_motif_edge_index
-        if atom_index.numel() == 0:
-            return motif_h
-
-        atom_context = scatter(
-            atom_h[atom_index],
-            motif_index,
-            dim=0,
-            dim_size=motif_h.size(0),
-            reduce="mean",
+        motif_out = self.motif_encoder(
+            x=data["motif"].x,
+            edge_index=data["motif", "connects", "motif"].edge_index,
+            edge_attr=data["motif", "connects", "motif"].edge_attr,
+            batch=data["motif"].batch,
         )
-        return self.norm(motif_h + atom_context)
+        return atom_out, motif_out
 
 
-class DrugGraphEncoder(nn.Module):
-    """Encode drug graph nodes for downstream interaction and pooling."""
+class GraphAddPoolEncoder(nn.Module):
+    """GCN-GAT graph encoder with global_add_pool, matching backupcode style."""
 
     def __init__(
         self,
         in_dim: int,
-        hidden_dim: int,
-        edge_dim: int,
+        conv_dim: int,
+        out_dim: int,
         num_layers: int,
         dropout: float,
     ):
@@ -140,51 +78,55 @@ class DrugGraphEncoder(nn.Module):
         if num_layers < 1:
             raise ValueError("num_layers must be at least 1")
 
-        self.input_proj = nn.Linear(in_dim, hidden_dim)
-        self.layers = nn.ModuleList([
-            GATConv(
-                in_channels=hidden_dim,
-                out_channels=hidden_dim,
-                edge_dim=edge_dim,
-                dropout=0.0,
-            )
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.gcn = GCNConv(in_channels=in_dim, out_channels=conv_dim)
+        self.gcn_bn = nn.BatchNorm1d(conv_dim)
+        self.gat_layers = nn.ModuleList([
+            GATConv(in_channels=conv_dim, out_channels=conv_dim)
             for _ in range(num_layers)
         ])
-        self.norms = nn.ModuleList([
-            nn.BatchNorm1d(hidden_dim) for _ in range(num_layers)
+        self.gat_bns = nn.ModuleList([
+            nn.BatchNorm1d(conv_dim) for _ in range(num_layers)
         ])
+        self.out_proj = nn.Linear(conv_dim, out_dim)
 
-    def forward(self, x: Tensor, edge_index: Tensor, edge_attr: Tensor) -> Tensor:
-        h = F.relu(self.input_proj(x))
-        for layer, norm in zip(self.layers, self.norms):
-            update = F.relu(layer(h, edge_index, edge_attr=edge_attr))
-            h = norm(h + update)
-        return h
+    def forward(
+        self,
+        x: Tensor,
+        edge_index: Tensor,
+        edge_attr: Tensor,
+        batch: Tensor,
+    ) -> Tensor:
+        edge_weight = edge_attr.mean(dim=1)
+        h = self.relu(self.gcn(x, edge_index, edge_weight=edge_weight))
+        h = self.gcn_bn(h)
+        for gat, batch_norm in zip(self.gat_layers, self.gat_bns):
+            h = F.relu(gat(h, edge_index))
+            h = batch_norm(h)
+        h = global_add_pool(h, batch)
+        h = F.relu(self.out_proj(h))
+        return self.dropout(h)
 
 
 class ProteinGraphEncoder(nn.Module):
-    """Encode full-length ESMC residue nodes following ProteinGraphNet."""
+    """Read full-length ESMC residue graphs following backup ProteinGraphNet."""
 
     def __init__(
         self,
         prot_in_dim: int = 1152,
         hidden_dim: int = 128,
-        num_layers: int = 2,
+        num_layers: int = 4,
         dropout: float = 0.2,
     ):
         super().__init__()
-        if num_layers < 1:
-            raise ValueError("num_layers must be at least 1")
-
-        self.gcn = GCNConv(in_channels=prot_in_dim, out_channels=hidden_dim)
-        self.gcn_bn = nn.BatchNorm1d(hidden_dim)
-        self.gat_layers = nn.ModuleList([
-            GATConv(in_channels=hidden_dim, out_channels=hidden_dim, dropout=dropout)
-            for _ in range(num_layers)
-        ])
-        self.gat_bns = nn.ModuleList([
-            nn.BatchNorm1d(hidden_dim) for _ in range(num_layers)
-        ])
+        self.encoder = GraphAddPoolEncoder(
+            in_dim=prot_in_dim,
+            conv_dim=2 * hidden_dim,
+            out_dim=hidden_dim,
+            num_layers=num_layers,
+            dropout=dropout,
+        )
 
     def forward(
         self,
@@ -192,20 +134,10 @@ class ProteinGraphEncoder(nn.Module):
         edge_index: Tensor,
         edge_weight: Tensor,
         batch: Tensor,
-        return_tokens: bool = False,
-    ):
-        # Keep ProteinGraphNet ordering: weighted GCN, then unweighted GAT blocks.
-        h = F.relu(self.gcn(x, edge_index, edge_weight=edge_weight))
-        h = self.gcn_bn(h)
-        for gat, batch_norm in zip(self.gat_layers, self.gat_bns):
-            h = F.relu(gat(h, edge_index))
-            h = batch_norm(h)
-        # Keep ProteinGraphNet's post-pooling MLP while returning a fusion embedding.
-        residue_tokens = h
-        pooled = global_mean_pool(residue_tokens, batch)
-        if return_tokens:
-            return pooled, residue_tokens
-        return pooled
+    ) -> Tensor:
+        if edge_weight.dim() == 1:
+            edge_weight = edge_weight.unsqueeze(-1)
+        return self.encoder(x, edge_index, edge_weight, batch)
 
 
 class SurfaceEncoder(nn.Module):

@@ -15,10 +15,10 @@
       --drug-stroke: #5a9f70;
       --protein-fill: #fff6df;
       --protein-stroke: #ce9b37;
-      --local-fill: #f1ecff;
-      --local-stroke: #8466c3;
-      --fusion-fill: #eaf3ff;
-      --fusion-stroke: #5f91c8;
+      --surface-fill: #eef7ff;
+      --surface-stroke: #5d92c8;
+      --fusion-fill: #f1ecff;
+      --fusion-stroke: #8466c3;
       --output-fill: #ffecee;
       --output-stroke: #d36975;
     }
@@ -30,7 +30,7 @@
       font-family: Arial, "Microsoft YaHei", sans-serif;
     }
     main {
-      max-width: 1500px;
+      max-width: 1440px;
       margin: 24px auto;
       padding: 0 20px 28px;
     }
@@ -42,23 +42,22 @@
       margin-top: 16px;
       padding: 16px;
       border: 1px solid #dce5ef;
-      border-radius: 14px;
+      border-radius: 8px;
       background: var(--panel);
       box-shadow: 0 5px 18px rgba(35, 58, 84, 0.08);
     }
-    svg { display: block; min-width: 1380px; }
+    svg { display: block; min-width: 1320px; }
     .section { font-size: 18px; font-weight: 700; fill: var(--text); }
     .label { font-size: 15px; font-weight: 700; fill: var(--text); }
     .small { font-size: 13px; fill: #40566f; }
     .tiny { font-size: 12px; fill: #5e7187; }
-    .box { stroke-width: 2; rx: 12; ry: 12; }
+    .box { stroke-width: 2; rx: 8; ry: 8; }
     .drug { fill: var(--drug-fill); stroke: var(--drug-stroke); }
     .protein { fill: var(--protein-fill); stroke: var(--protein-stroke); }
-    .local { fill: var(--local-fill); stroke: var(--local-stroke); }
+    .surface { fill: var(--surface-fill); stroke: var(--surface-stroke); }
     .fusion { fill: var(--fusion-fill); stroke: var(--fusion-stroke); }
     .output { fill: var(--output-fill); stroke: var(--output-stroke); }
     .arrow { stroke: var(--line); stroke-width: 2.2; fill: none; marker-end: url(#arrow); }
-    .dashed { stroke: #8b6dc5; stroke-width: 2; stroke-dasharray: 6 5; fill: none; marker-end: url(#purple-arrow); }
     .note {
       margin-top: 14px;
       color: var(--muted);
@@ -71,216 +70,173 @@
 <body>
 <main>
   <h1>Current DTAModel Architecture</h1>
-  <p>Two-panel view: feature processing outputs on top, fusion and prediction on bottom.</p>
+  <p>Readout model: atom and motif AttentiveFP readouts, projected fingerprint, protein node readout, surface readout, projected ESM global features, and a drug-target pair MLP. Motif-residue cross-attention is not used.</p>
 
   <div class="card">
-    <h2>1. Feature Processing And Outputs</h2>
-    <svg xmlns="http://www.w3.org/2000/svg" width="1380" height="620" viewBox="0 0 1380 620" role="img" aria-label="Feature processing diagram">
+    <h2>1. Feature Processing And Readouts</h2>
+    <svg xmlns="http://www.w3.org/2000/svg" width="1450" height="610" viewBox="0 0 1450 610" role="img" aria-label="Feature processing diagram">
       <defs>
         <marker id="arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
           <polygon points="0 0, 10 3.5, 0 7" fill="#64778d"/>
         </marker>
-        <marker id="purple-arrow" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-          <polygon points="0 0, 10 3.5, 0 7" fill="#8b6dc5"/>
-        </marker>
       </defs>
 
-      <text x="28" y="36" class="section">Drug-side feature processing</text>
-      <text x="28" y="328" class="section">Protein-side feature processing</text>
+      <text x="28" y="36" class="section">Drug-side AttentiveFP readouts</text>
+      <text x="28" y="300" class="section">Protein and surface readouts</text>
 
-      <!-- Drug feature processing -->
-      <rect x="28" y="62" width="180" height="72" class="box drug"/>
-      <text x="118" y="91" text-anchor="middle" class="label">Atom graph</text>
-      <text x="118" y="115" text-anchor="middle" class="small">37-d atom nodes</text>
+      <rect x="28" y="64" width="190" height="76" class="box drug"/>
+      <text x="123" y="94" text-anchor="middle" class="label">Atom graph</text>
+      <text x="123" y="118" text-anchor="middle" class="small">37-d atom nodes</text>
 
-      <rect x="28" y="170" width="180" height="72" class="box drug"/>
-      <text x="118" y="199" text-anchor="middle" class="label">Motif graph</text>
-      <text x="118" y="223" text-anchor="middle" class="small">50-d motif nodes</text>
+      <rect x="28" y="172" width="190" height="76" class="box drug"/>
+      <text x="123" y="202" text-anchor="middle" class="label">Motif graph</text>
+      <text x="123" y="226" text-anchor="middle" class="small">50-d motif nodes</text>
 
-      <rect x="260" y="62" width="215" height="72" class="box drug"/>
-      <text x="367" y="91" text-anchor="middle" class="label">DrugGraphEncoder</text>
-      <text x="367" y="115" text-anchor="middle" class="small">GATConv + residual + BN</text>
+      <rect x="285" y="64" width="245" height="76" class="box drug"/>
+      <text x="407" y="94" text-anchor="middle" class="label">AttentiveFP</text>
+      <text x="407" y="118" text-anchor="middle" class="small">atom num_layers, timesteps=2</text>
 
-      <rect x="260" y="170" width="215" height="72" class="box drug"/>
-      <text x="367" y="199" text-anchor="middle" class="label">DrugGraphEncoder</text>
-      <text x="367" y="223" text-anchor="middle" class="small">GATConv + residual + BN</text>
+      <rect x="285" y="172" width="245" height="76" class="box drug"/>
+      <text x="407" y="202" text-anchor="middle" class="label">AttentiveFP</text>
+      <text x="407" y="226" text-anchor="middle" class="small">motif num_layers, timesteps=2</text>
 
-      <rect x="525" y="62" width="190" height="72" class="box drug"/>
-      <text x="620" y="91" text-anchor="middle" class="label">atom_tokens</text>
-      <text x="620" y="115" text-anchor="middle" class="small">[N_atom, d]</text>
+      <rect x="600" y="64" width="210" height="76" class="box drug"/>
+      <text x="705" y="94" text-anchor="middle" class="label">atom_out</text>
+      <text x="705" y="118" text-anchor="middle" class="small">molecule readout [B, d]</text>
 
-      <rect x="525" y="170" width="190" height="72" class="box drug"/>
-      <text x="620" y="199" text-anchor="middle" class="label">motif_tokens</text>
-      <text x="620" y="223" text-anchor="middle" class="small">[N_motif, d]</text>
+      <rect x="600" y="172" width="210" height="76" class="box drug"/>
+      <text x="705" y="202" text-anchor="middle" class="label">motif_out</text>
+      <text x="705" y="226" text-anchor="middle" class="small">molecule readout [B, d]</text>
 
-      <rect x="775" y="116" width="230" height="82" class="box drug"/>
-      <text x="890" y="147" text-anchor="middle" class="label">Aggregation</text>
-      <text x="890" y="171" text-anchor="middle" class="small">atom-to-motif scatter mean</text>
-      <text x="890" y="190" text-anchor="middle" class="tiny">motif + mean(atom context)</text>
+      <rect x="890" y="118" width="240" height="74" class="box fusion"/>
+      <text x="1010" y="148" text-anchor="middle" class="label">drug input</text>
+      <text x="1010" y="172" text-anchor="middle" class="small">atom_out, motif_out, fp_proj</text>
 
-      <rect x="1060" y="116" width="245" height="82" class="box drug"/>
-      <text x="1182" y="147" text-anchor="middle" class="label">enriched_motif_tokens</text>
-      <text x="1182" y="171" text-anchor="middle" class="small">[N_motif, d]</text>
-      <text x="1182" y="190" text-anchor="middle" class="tiny">used by Fusion panel</text>
+      <path d="M218 102 L285 102" class="arrow"/>
+      <path d="M218 210 L285 210" class="arrow"/>
+      <path d="M530 102 L600 102" class="arrow"/>
+      <path d="M530 210 L600 210" class="arrow"/>
+      <path d="M810 102 L860 102 L860 142 L890 142" class="arrow"/>
+      <path d="M810 210 L860 210 L860 172 L890 172" class="arrow"/>
 
-      <rect x="775" y="238" width="230" height="72" class="box drug"/>
-      <text x="890" y="267" text-anchor="middle" class="label">Morgan fingerprint</text>
-      <text x="890" y="291" text-anchor="middle" class="small">1024-d global prior</text>
+      <rect x="28" y="330" width="210" height="82" class="box protein"/>
+      <text x="133" y="360" text-anchor="middle" class="label">Residue graph</text>
+      <text x="133" y="384" text-anchor="middle" class="small">ESM-C nodes, 1152-d</text>
+      <text x="133" y="404" text-anchor="middle" class="tiny">weighted contact edges</text>
 
-      <rect x="1060" y="238" width="245" height="72" class="box drug"/>
-      <text x="1182" y="267" text-anchor="middle" class="label">fp_proj</text>
-      <text x="1182" y="291" text-anchor="middle" class="small">Linear → ReLU → Dropout</text>
+      <rect x="300" y="330" width="245" height="82" class="box protein"/>
+      <text x="422" y="360" text-anchor="middle" class="label">ProteinGraphEncoder</text>
+      <text x="422" y="384" text-anchor="middle" class="small">GCNConv + GATConv</text>
+      <text x="422" y="404" text-anchor="middle" class="tiny">returns residue_tokens</text>
 
-      <path d="M208 98 L260 98" class="arrow"/>
-      <path d="M208 206 L260 206" class="arrow"/>
-      <path d="M475 98 L525 98" class="arrow"/>
-      <path d="M475 206 L525 206" class="arrow"/>
-      <path d="M715 98 L748 98 L748 146 L775 146" class="arrow"/>
-      <path d="M715 206 L748 206 L748 174 L775 174" class="arrow"/>
-      <path d="M1005 157 L1060 157" class="arrow"/>
-      <path d="M1005 274 L1060 274" class="arrow"/>
+      <rect x="615" y="320" width="220" height="74" class="box protein"/>
+      <text x="725" y="350" text-anchor="middle" class="label">Readout</text>
+      <text x="725" y="374" text-anchor="middle" class="small">mean+max or attention+max</text>
 
-      <!-- Protein feature processing -->
-      <rect x="28" y="354" width="190" height="80" class="box protein"/>
-      <text x="123" y="383" text-anchor="middle" class="label">Residue graph</text>
-      <text x="123" y="407" text-anchor="middle" class="small">ESM-C nodes, 1152-d</text>
-      <text x="123" y="426" text-anchor="middle" class="tiny">weighted contact edges</text>
+      <rect x="615" y="424" width="220" height="74" class="box protein"/>
+      <text x="725" y="454" text-anchor="middle" class="label">prot_readout_proj</text>
+      <text x="725" y="478" text-anchor="middle" class="small">2d to d projection</text>
 
-      <rect x="270" y="354" width="225" height="80" class="box protein"/>
-      <text x="382" y="383" text-anchor="middle" class="label">ProteinGraphEncoder</text>
-      <text x="382" y="407" text-anchor="middle" class="small">GCNConv + GATConv</text>
-      <text x="382" y="426" text-anchor="middle" class="tiny">BatchNorm1d</text>
+      <rect x="900" y="372" width="215" height="74" class="box protein"/>
+      <text x="1007" y="402" text-anchor="middle" class="label">protein_out</text>
+      <text x="1007" y="426" text-anchor="middle" class="small">[B, d]</text>
 
-      <rect x="545" y="344" width="210" height="72" class="box protein"/>
-      <text x="650" y="373" text-anchor="middle" class="label">residue_tokens</text>
-      <text x="650" y="397" text-anchor="middle" class="small">[N_residue, d]</text>
+      <rect x="28" y="500" width="210" height="74" class="box surface"/>
+      <text x="133" y="530" text-anchor="middle" class="label">Pocket surface</text>
+      <text x="133" y="554" text-anchor="middle" class="small">surface_embedding + mask</text>
 
-      <rect x="545" y="436" width="210" height="72" class="box protein"/>
-      <text x="650" y="465" text-anchor="middle" class="label">protein_out</text>
-      <text x="650" y="489" text-anchor="middle" class="small">global_mean_pool: [B, d]</text>
+      <rect x="300" y="500" width="245" height="74" class="box surface"/>
+      <text x="422" y="530" text-anchor="middle" class="label">SurfaceEncoder</text>
+      <text x="422" y="554" text-anchor="middle" class="small">masked attention pooling</text>
 
-      <rect x="28" y="514" width="190" height="72" class="box protein"/>
-      <text x="123" y="543" text-anchor="middle" class="label">Pocket surface</text>
-      <text x="123" y="567" text-anchor="middle" class="small">up to 512 × 128</text>
+      <rect x="615" y="512" width="220" height="62" class="box surface"/>
+      <text x="725" y="548" text-anchor="middle" class="label">surface [B, d]</text>
 
-      <rect x="270" y="514" width="225" height="72" class="box protein"/>
-      <text x="382" y="543" text-anchor="middle" class="label">SurfaceEncoder</text>
-      <text x="382" y="567" text-anchor="middle" class="small">masked attention pool</text>
+      <path d="M238 371 L300 371" class="arrow"/>
+      <path d="M545 371 L615 357" class="arrow"/>
+      <path d="M725 394 L725 424" class="arrow"/>
+      <path d="M835 461 L880 461 L880 409 L900 409" class="arrow"/>
+      <path d="M238 537 L300 537" class="arrow"/>
+      <path d="M545 537 L615 543" class="arrow"/>
 
-      <rect x="545" y="514" width="210" height="72" class="box protein"/>
-      <text x="650" y="543" text-anchor="middle" class="label">surface</text>
-      <text x="650" y="567" text-anchor="middle" class="small">[B, d]</text>
+      <rect x="1165" y="295" width="260" height="156" class="box output"/>
+      <text x="1245" y="332" text-anchor="middle" class="label">Model inputs to fusion</text>
+      <text x="1245" y="361" text-anchor="middle" class="small">atom_out, motif_out, fp_proj</text>
+      <text x="1245" y="385" text-anchor="middle" class="small">protein_out, surface, esm_global_proj</text>
+      <text x="1245" y="414" text-anchor="middle" class="tiny">cross-attention disabled</text>
 
-      <path d="M218 394 L270 394" class="arrow"/>
-      <path d="M495 394 L520 394 L520 380 L545 380" class="arrow"/>
-      <path d="M495 394 L520 394 L520 472 L545 472" class="arrow"/>
-      <path d="M218 550 L270 550" class="arrow"/>
-      <path d="M495 550 L545 550" class="arrow"/>
-
-      <rect x="900" y="390" width="265" height="122" class="box output"/>
-      <text x="1032" y="426" text-anchor="middle" class="label">Feature Outputs</text>
-      <text x="1032" y="454" text-anchor="middle" class="small">enriched_motif_tokens, fp_proj</text>
-      <text x="1032" y="477" text-anchor="middle" class="small">residue_tokens, protein_out, surface</text>
-      <text x="1032" y="500" text-anchor="middle" class="tiny">passed to Fusion panel</text>
-
-      <path d="M1305 157 L1336 157 L1336 451 L1165 451" class="arrow"/>
-      <path d="M1305 274 L1336 274 L1336 451 L1165 451" class="arrow"/>
-      <path d="M755 380 L865 380 L865 430 L900 430" class="arrow"/>
-      <path d="M755 472 L865 472 L865 454 L900 454" class="arrow"/>
-      <path d="M755 550 L865 550 L865 478 L900 478" class="arrow"/>
+      <path d="M1130 155 L1180 155 L1180 350 L1165 350" class="arrow"/>
+      <path d="M1115 409 L1165 385" class="arrow"/>
+      <path d="M835 543 L1180 543 L1180 410 L1165 410" class="arrow"/>
     </svg>
   </div>
 
   <div class="card">
-    <h2>2. Fusion And Prediction</h2>
-    <svg xmlns="http://www.w3.org/2000/svg" width="1380" height="470" viewBox="0 0 1380 470" role="img" aria-label="Fusion and prediction diagram">
+    <h2>2. Drug-Target Pair Fusion And Prediction</h2>
+    <svg xmlns="http://www.w3.org/2000/svg" width="1320" height="430" viewBox="0 0 1320 430" role="img" aria-label="Fusion and prediction diagram">
       <defs>
         <marker id="arrow2" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
           <polygon points="0 0, 10 3.5, 0 7" fill="#64778d"/>
         </marker>
-        <marker id="purple-arrow2" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
-          <polygon points="0 0, 10 3.5, 0 7" fill="#8b6dc5"/>
-        </marker>
       </defs>
 
-      <text x="28" y="36" class="section">Drug and target global fusion</text>
-      <text x="640" y="36" class="section">Motif-residue local interaction</text>
-      <text x="1060" y="36" class="section">Prediction</text>
+      <text x="28" y="36" class="section">Drug branch</text>
+      <text x="28" y="222" class="section">Target branch</text>
+      <text x="620" y="36" class="section">Pair features</text>
+      <text x="1050" y="36" class="section">Prediction</text>
 
-      <rect x="28" y="70" width="230" height="80" class="box drug"/>
-      <text x="143" y="101" text-anchor="middle" class="label">enriched_motif_tokens</text>
-      <text x="143" y="126" text-anchor="middle" class="small">global_mean_pool → [B, d]</text>
+      <rect x="28" y="70" width="210" height="72" class="box drug"/>
+      <text x="133" y="99" text-anchor="middle" class="label">atom_out</text>
+      <text x="133" y="123" text-anchor="middle" class="small">[B, d]</text>
 
-      <rect x="28" y="185" width="230" height="70" class="box drug"/>
-      <text x="143" y="213" text-anchor="middle" class="label">fp_proj</text>
-      <text x="143" y="237" text-anchor="middle" class="small">[B, d]</text>
+      <rect x="28" y="158" width="210" height="72" class="box drug"/>
+      <text x="133" y="187" text-anchor="middle" class="label">motif_out</text>
+      <text x="133" y="211" text-anchor="middle" class="small">[B, d]</text>
 
-      <rect x="310" y="112" width="235" height="86" class="box fusion"/>
-      <text x="427" y="144" text-anchor="middle" class="label">drug_proj</text>
-      <text x="427" y="169" text-anchor="middle" class="small">concat → Linear/ReLU/Dropout</text>
-      <text x="427" y="190" text-anchor="middle" class="tiny">drug: [B, d]</text>
+      <rect x="310" y="105" width="235" height="86" class="box fusion"/>
+      <text x="427" y="137" text-anchor="middle" class="label">drug_proj</text>
+      <text x="427" y="162" text-anchor="middle" class="small">concat 3 views then MLP</text>
+      <text x="427" y="183" text-anchor="middle" class="tiny">drug [B, d]</text>
 
-      <rect x="28" y="305" width="230" height="70" class="box protein"/>
-      <text x="143" y="333" text-anchor="middle" class="label">protein_out</text>
-      <text x="143" y="357" text-anchor="middle" class="small">[B, d]</text>
+      <rect x="28" y="258" width="210" height="72" class="box protein"/>
+      <text x="133" y="287" text-anchor="middle" class="label">protein_out</text>
+      <text x="133" y="311" text-anchor="middle" class="small">[B, d]</text>
 
-      <rect x="28" y="395" width="230" height="54" class="box protein"/>
-      <text x="143" y="428" text-anchor="middle" class="label">surface [B, d]</text>
+      <rect x="28" y="346" width="210" height="58" class="box surface"/>
+      <text x="133" y="381" text-anchor="middle" class="label">surface [B, d]</text>
 
-      <rect x="310" y="325" width="235" height="86" class="box fusion"/>
-      <text x="427" y="357" text-anchor="middle" class="label">target_proj</text>
-      <text x="427" y="382" text-anchor="middle" class="small">concat → Linear/ReLU/Dropout</text>
-      <text x="427" y="403" text-anchor="middle" class="tiny">target: [B, d]</text>
+      <rect x="310" y="292" width="235" height="86" class="box fusion"/>
+      <text x="427" y="324" text-anchor="middle" class="label">target_proj</text>
+      <text x="427" y="349" text-anchor="middle" class="small">concat 3 views then MLP</text>
+      <text x="427" y="370" text-anchor="middle" class="tiny">target [B, d]</text>
 
-      <rect x="620" y="210" width="235" height="86" class="box fusion"/>
-      <text x="737" y="242" text-anchor="middle" class="label">global_pair_proj</text>
-      <text x="737" y="267" text-anchor="middle" class="small">concat(drug, target)</text>
-      <text x="737" y="288" text-anchor="middle" class="tiny">global_pair: [B, d]</text>
+      <rect x="635" y="128" width="275" height="186" class="box fusion"/>
+      <text x="772" y="164" text-anchor="middle" class="label">pair feature construction</text>
+      <text x="772" y="196" text-anchor="middle" class="small">drug</text>
+      <text x="772" y="222" text-anchor="middle" class="small">target</text>
+      <text x="772" y="248" text-anchor="middle" class="small">concat(drug, target)</text>
+      <text x="772" y="300" text-anchor="middle" class="tiny">concat shape [B, 2d]</text>
 
-      <path d="M258 110 L310 138" class="arrow"/>
-      <path d="M258 220 L310 168" class="arrow"/>
-      <path d="M258 340 L310 356" class="arrow"/>
-      <path d="M258 422 L310 390" class="arrow"/>
-      <path d="M545 155 L590 155 L590 238 L620 238" class="arrow"/>
-      <path d="M545 368 L590 368 L590 268 L620 268" class="arrow"/>
+      <rect x="1010" y="150" width="240" height="110" class="box output"/>
+      <text x="1130" y="187" text-anchor="middle" class="label">MLPDecoder</text>
+      <text x="1130" y="216" text-anchor="middle" class="small">2d to 2d to d to output</text>
+      <text x="1130" y="240" text-anchor="middle" class="small">affinity prediction</text>
 
-      <rect x="640" y="70" width="230" height="74" class="box local"/>
-      <text x="755" y="100" text-anchor="middle" class="label">Interaction</text>
-      <text x="755" y="124" text-anchor="middle" class="small">QKᵀ over motif-residue tokens</text>
-
-      <rect x="910" y="70" width="205" height="74" class="box local"/>
-      <text x="1012" y="100" text-anchor="middle" class="label">local</text>
-      <text x="1012" y="124" text-anchor="middle" class="small">motif-gated pooling: [B, d]</text>
-
-      <rect x="910" y="210" width="205" height="86" class="box fusion"/>
-      <text x="1012" y="242" text-anchor="middle" class="label">local_proj</text>
-      <text x="1012" y="267" text-anchor="middle" class="small">Linear/ReLU/Dropout</text>
-      <text x="1012" y="288" text-anchor="middle" class="tiny">local_context: [B, d]</text>
-
-      <rect x="1160" y="210" width="190" height="86" class="box fusion"/>
-      <text x="1255" y="238" text-anchor="middle" class="label">LocalGate</text>
-      <text x="1255" y="263" text-anchor="middle" class="small">sigmoid([global, local])</text>
-      <text x="1255" y="285" text-anchor="middle" class="tiny">fused = global + gate · local</text>
-
-      <rect x="1160" y="340" width="190" height="70" class="box output"/>
-      <text x="1255" y="369" text-anchor="middle" class="label">MLPDecoder</text>
-      <text x="1255" y="393" text-anchor="middle" class="small">affinity prediction</text>
-
-      <path d="M870 107 L910 107" class="arrow"/>
-      <path d="M1012 144 L1012 210" class="arrow"/>
-      <path d="M855 253 L1160 238" class="arrow"/>
-      <path d="M1115 253 L1160 267" class="arrow"/>
-      <path d="M1255 296 L1255 340" class="arrow"/>
-
-      <text x="640" y="438" class="tiny">Saved interpretation tensors: last_motif_residue_attention [B, M, R], last_motif_weight [B, M, 1], last_local_gate [B, d]</text>
+      <path d="M238 106 L310 132" class="arrow"/>
+      <path d="M238 194 L310 168" class="arrow"/>
+      <path d="M238 294 L310 318" class="arrow"/>
+      <path d="M238 375 L310 354" class="arrow"/>
+      <path d="M545 148 L605 148 L605 190 L635 190" class="arrow"/>
+      <path d="M545 335 L605 335 L605 242 L635 242" class="arrow"/>
+      <path d="M910 221 L1010 205" class="arrow"/>
     </svg>
   </div>
 
   <div class="note">
     <strong>Notes:</strong>
-    <code>d</code> denotes <code>hidden_dim</code>. The upper panel shows how raw graph, fingerprint, residue, and
-    surface features are encoded into reusable tensors. The lower panel shows the current fusion strategy: global
-    drug-target fusion is the main path, and motif-residue interaction is added as a gated local residual.
+    <code>d</code> denotes <code>hidden_dim</code>. The current model uses projected fingerprint and projected ESM
+    global features as compact priors. It does not use atom-to-motif aggregation, dense motif-residue cross-attention,
+    local gating, or explicit pair product/distance terms.
   </div>
 </main>
 </body>
