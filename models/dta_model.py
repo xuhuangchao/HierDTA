@@ -7,16 +7,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import Batch, Data, HeteroData
+from torch_geometric.utils import to_dense_batch
 
-from .encoder import HierMolGNN, ProteinGraphEncoder, SurfaceEncoder
+from .encoder import HierMolGNN
 
 
 class DTABatch:
-    """Container for drug graphs, contact graphs, surface points, globals, and labels."""
+    """Container for drug graphs, surface points, globals, and labels."""
 
     __slots__ = (
         "hetero",
-        "protein_graph",
         "fingerprint",
         "esm_global",
         "surface_embedding",
@@ -43,7 +43,7 @@ class DTABatch:
 
 
 def dta_collate_fn(data_list: List[Any]) -> DTABatch:
-    """Batch nested heterogeneous drug graphs and protein residue graphs."""
+    """Batch nested heterogeneous drug graphs and surface point clouds."""
 
     max_surface_points = max(data.surface_embedding.size(0) for data in data_list)
     surface_dim = data_list[0].surface_embedding.size(1)
@@ -60,7 +60,6 @@ def dta_collate_fn(data_list: List[Any]) -> DTABatch:
 
     return DTABatch(
         hetero=Batch.from_data_list([data.hetero for data in data_list]),
-        protein_graph=Batch.from_data_list([data.protein_graph for data in data_list]),
         fingerprint=torch.cat([data.fingerprint for data in data_list], dim=0),
         esm_global=torch.cat([data.esm_global for data in data_list], dim=0),
         surface_embedding=surface_embedding,
@@ -92,37 +91,43 @@ class MLPDecoder(nn.Module):
         return self.fc3(x)
 
 
-class DTAInteractionHead(nn.Module):
-    """Fuse drug and protein views with intra-modal attention.
+class DTASurfaceCrossHead(nn.Module):
+    """Cross-attention between drug atoms/motifs and dMaSIF surface points.
 
-    Drug side: attention-weighted fusion of [atom_mol, motif_mol] → drug_repr [d]
-    Protein side: attention-weighted fusion of [protein_out, surface] → prot_repr [d]
-    Precomputed features: fp_proj [d] + esm_proj [d] concatenated at the final stage.
-    Final: [drug_repr, prot_repr, fp_proj, esm_proj, drug_repr⊙prot_repr] → MLP → affinity
+    A learnable point sampler selects top-k surface points first, reducing
+    the softmax competition from 512-way to k-way. Drug substructures then
+    cross-attend to these focused points.
+    drug_repr already encodes drug-surface interaction, so surface_mean is
+    excluded from the final MLP.
+    Final: [drug_repr, fp, esm].
     """
 
     def __init__(
         self,
-        d: int = 256,
+        d: int = 128,
         num_tasks: int = 1,
         dropout: float = 0.2,
         fp_in_dim: int = 1024,
         esm_dim: int = 1152,
     ):
         super().__init__()
-        # ── Drug side: 2-view attention (atom + motif) ──
-        self.drug_view_attn = nn.Sequential(
+        self.d = d
+        self.num_sampled_points = 128
+
+        # ── Learnable point sampler (512 → k, drug-independent) ──
+        self.point_sampler = nn.Sequential(
             nn.Linear(d, d // 4),
             nn.ReLU(),
             nn.Linear(d // 4, 1),
         )
 
-        # ── Protein side: 2-view attention (protein_out + surface) ──
-        self.prot_view_attn = nn.Sequential(
-            nn.Linear(d, d // 4),
-            nn.ReLU(),
-            nn.Linear(d // 4, 1),
-        )
+        # ── Cross-attention: drug substructures → sampled surface points ──
+        self.atom_cross_attn = nn.MultiheadAttention(d, num_heads=1, batch_first=True, dropout=dropout)
+        self.motif_cross_attn = nn.MultiheadAttention(d, num_heads=1, batch_first=True, dropout=dropout)
+
+        # ── Learned pooling: which drug substructures drive binding? ──
+        self.atom_pool = nn.Sequential(nn.Linear(d, d // 4), nn.ReLU(), nn.Linear(d // 4, 1))
+        self.motif_pool = nn.Sequential(nn.Linear(d, d // 4), nn.ReLU(), nn.Linear(d // 4, 1))
 
         # ── Precomputed feature projections ──
         self.fp_proj = nn.Sequential(
@@ -136,9 +141,9 @@ class DTAInteractionHead(nn.Module):
             nn.Dropout(dropout),
         )
 
-        # ── Final prediction: 5d input (drug_repr + prot_repr + fp + esm + interaction) ──
+        # ── Final MLP: 3d input (drug_repr + fp + esm), surface_mean removed ──
         self.mlp = MLPDecoder(
-            in_dim=5 * d,
+            in_dim=3 * d,
             hidden_dim1=2 * d,
             hidden_dim2=d,
             binary=num_tasks,
@@ -147,51 +152,88 @@ class DTAInteractionHead(nn.Module):
 
     def forward(
         self,
-        atom_mol_out: Tensor,
-        motif_mol_out: Tensor,
-        protein_out: Tensor,
-        fingerprint: Tensor,
-        surface: Tensor,
-        esm_global: Tensor,
-    ) -> Tensor:
+        atom_nodes: Tensor,       # [total_atoms, d]
+        atom_batch: Tensor,       # [total_atoms]
+        motif_nodes: Tensor,      # [total_motifs, d]
+        motif_batch: Tensor,      # [total_motifs]
+        surface_embedding: Tensor,  # [B, N_s, surface_dim]
+        surface_mask: Tensor,     # [B, N_s]
+        fingerprint: Tensor,      # [B, fp_in_dim]
+        esm_global: Tensor,       # [B, esm_dim]
+    ) -> tuple[Tensor, dict]:
         if fingerprint.dim() == 3:
             fingerprint = fingerprint.squeeze(1)
 
-        # ── Drug fusion: attention over 2 GNN views ──
-        drug_views = torch.stack([atom_mol_out, motif_mol_out], dim=1)  # [B, 2, d]
-        drug_w = F.softmax(self.drug_view_attn(drug_views).squeeze(-1), dim=-1)   # [B, 2]
-        drug_repr = (drug_views * drug_w.unsqueeze(-1)).sum(dim=1)                  # [B, d]
+        # ── Dense batch conversion ──
+        atom_d, atom_mask = to_dense_batch(atom_nodes, atom_batch)      # [B, N_a, d]
+        motif_d, motif_mask = to_dense_batch(motif_nodes, motif_batch)  # [B, N_m, d]
 
-        # ── Protein fusion: attention over 2 learned views ──
-        prot_views = torch.stack([protein_out, surface], dim=1)        # [B, 2, d]
-        prot_w = F.softmax(self.prot_view_attn(prot_views).squeeze(-1), dim=-1)     # [B, 2]
-        prot_repr = (prot_views * prot_w.unsqueeze(-1)).sum(dim=1)                    # [B, d]
+        # ── Surface points as key/value for cross-attention ──
+        # surface_embedding is already dense [B, N_s, d], just use directly
+        surface = surface_embedding  # [B, N_s, d]
 
-        # ── Precomputed high-level features (direct, no attention) ──
-        fp = self.fp_proj(fingerprint)                                                # [B, d]
-        esm = self.esm_proj(esm_global)                                               # [B, d]
+        # ── Cross-Attention: Atoms → Surface Points ──
+        atom_enhanced, atom_attn = self.atom_cross_attn(
+            query=atom_d,
+            key=surface,
+            value=surface,
+            key_padding_mask=~surface_mask,
+        )  # [B, N_a, d], [B, N_a, N_s]
 
-        # ── Explicit interaction signal ──
-        interaction = drug_repr * prot_repr                                           # [B, d]
+        # ── Cross-Attention: Motifs → Surface Points ──
+        motif_enhanced, motif_attn = self.motif_cross_attn(
+            query=motif_d,
+            key=surface,
+            value=surface,
+            key_padding_mask=~surface_mask,
+        )
 
-        # ── Final: concatenate all 5 components ──
-        return self.mlp(torch.cat([drug_repr, prot_repr, fp, esm, interaction], dim=-1))  # [B, 5d]
+        # ── Learned attention-based pooling over cross-attention outputs ──
+        atom_scores = self.atom_pool(atom_enhanced).squeeze(-1)       # [B, N_a]
+        atom_scores = atom_scores.masked_fill(~atom_mask, float('-inf'))
+        atom_w = F.softmax(atom_scores, dim=-1)
+        atom_repr = (atom_enhanced * atom_w.unsqueeze(-1)).sum(dim=1)  # [B, d]
+
+        motif_scores = self.motif_pool(motif_enhanced).squeeze(-1)    # [B, N_m]
+        motif_scores = motif_scores.masked_fill(~motif_mask, float('-inf'))
+        motif_w = F.softmax(motif_scores, dim=-1)
+        motif_repr = (motif_enhanced * motif_w.unsqueeze(-1)).sum(dim=1)  # [B, d]
+
+        # ── Fuse drug representation ──
+        drug_repr = atom_repr + motif_repr  # [B, d]
+
+        # ── Surface mean as global pocket proxy ──
+        surface_mean = (surface * surface_mask.unsqueeze(-1)).sum(dim=1) / \
+                       surface_mask.sum(dim=1, keepdim=True).float().clamp(min=1)  # [B, d]
+
+        # ── Precomputed features ──
+        fp = self.fp_proj(fingerprint)
+        esm = self.esm_proj(esm_global)
+
+        # ── Final: no Hadamard ──
+        out = self.mlp(torch.cat([drug_repr, surface_mean, fp, esm], dim=-1))  # [B, 4d]
+
+        attn_dict = {
+            'atom_to_surface': atom_attn,      # [B, N_a, N_s]
+            'motif_to_surface': motif_attn,    # [B, N_m, N_s]
+            'atom_importance': atom_w,
+            'motif_importance': motif_w,
+        }
+        return out, attn_dict
 
 
 class DTAModel(nn.Module):
-    """DTA model with hierarchical drug GNN and GCNConv→GATConv protein encoder."""
+    """DTA model with hierarchical drug GNN and surface-point cross-attention."""
 
     def __init__(
         self,
-        hidden_dim: int = 256,
+        hidden_dim: int = 128,
         num_tasks: int = 1,
         task: str = "regression",
         dropout: float = 0.1,
         atom_in_dim: int = 37,
         motif_in_dim: int = 50,
         mol_num_layers: int = 2,
-        prot_in_dim: int = 1152,
-        prot_num_layers: int = 2,
         fp_in_dim: int = 1024,
         esm_dim: int = 1152,
     ):
@@ -204,14 +246,7 @@ class DTAModel(nn.Module):
             num_layers=mol_num_layers,
             dropout=dropout,
         )
-        self.prot_encoder = ProteinGraphEncoder(
-            prot_in_dim=prot_in_dim,
-            hidden_dim=hidden_dim,
-            num_layers=prot_num_layers,
-            dropout=dropout,
-        )
-        self.surface_encoder = SurfaceEncoder()
-        self.fusion_head = DTAInteractionHead(
+        self.fusion_head = DTASurfaceCrossHead(
             d=hidden_dim,
             num_tasks=num_tasks,
             dropout=dropout,
@@ -219,47 +254,31 @@ class DTAModel(nn.Module):
             esm_dim=esm_dim,
         )
 
-    def forward(self, data: DTABatch) -> Tensor:
-        atom_mol_out, motif_mol_out = self.encode_drug(data)
-        protein_out = self.encode_protein(data)
-        surface = self.surface_encoder(data.surface_embedding, data.surface_mask)
+    def forward(self, data: DTABatch) -> tuple[Tensor, dict]:
+        (atom_pooled, motif_pooled, atom_nodes, motif_nodes, atom_batch, motif_batch) = self.encode_drug(data)
         return self.fusion_head(
-            atom_mol_out=atom_mol_out,
-            motif_mol_out=motif_mol_out,
-            protein_out=protein_out,
+            atom_nodes=atom_nodes,
+            atom_batch=atom_batch,
+            motif_nodes=motif_nodes,
+            motif_batch=motif_batch,
+            surface_embedding=data.surface_embedding,
+            surface_mask=data.surface_mask,
             fingerprint=data.fingerprint,
-            surface=surface,
             esm_global=data.esm_global,
         )
 
     def encode_drug(self, data: DTABatch):
-        """Return atom-level and motif-level molecular graph representations."""
-
+        """Return pooled + unpooled atom/motif nodes and batch indices."""
         return self.drug_encoder(data.hetero)
-
-    def encode_protein(self, data: DTABatch):
-        """Return one pooled representation per full-length protein graph."""
-
-        graph = data.protein_graph
-        return self.prot_encoder(
-            x = graph.x, 
-            edge_index=graph.edge_index,
-            edge_weight=graph.edge_weight,
-            batch=graph.batch,
-        )
 
     def count_parameters(self) -> dict:
         def count(module):
             return sum(parameter.numel() for parameter in module.parameters() if parameter.requires_grad)
         
         print(self.drug_encoder)
-        print(self.prot_encoder)
-        print(self.surface_encoder)
         print(self.fusion_head)
         return {
             "drug_encoder": count(self.drug_encoder),
-            "prot_encoder": count(self.prot_encoder),
-            "surface_encoder": count(self.surface_encoder),
             "fusion_head": count(self.fusion_head),
             "total": count(self),
         }

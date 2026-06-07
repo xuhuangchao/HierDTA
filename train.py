@@ -56,8 +56,6 @@ def parse_args():
     parser.add_argument('--motif_in_dim', type=int, default=50, help='Motif feature dimension')
     parser.add_argument('--mol_num_layers', type=int, default=2, help='Molecular GAT layers after initial GCN')
 
-    parser.add_argument('--prot_in_dim', type=int, default=1152, help='ESMC residue feature dimension')
-    parser.add_argument('--prot_num_layers', type=int, default=2, help='Protein GAT layers after the initial GCN')
     parser.add_argument('--fp_in_dim', type=int, default=1024, help='Fingerprint dimension')
     parser.add_argument('--run_name', type=str, default='inter', help='Output filename suffix')
 
@@ -118,8 +116,6 @@ def build_model(args):
         atom_in_dim=args.atom_in_dim,
         motif_in_dim=args.motif_in_dim,
         mol_num_layers=args.mol_num_layers,
-        prot_in_dim=args.prot_in_dim,
-        prot_num_layers=args.prot_num_layers,
         fp_in_dim=args.fp_in_dim,
     )
 
@@ -146,7 +142,7 @@ def train_one_epoch(model, device, loader, optimizer, loss_fn, epoch, log_interv
         labels = batch.y.view(-1, 1).float()
 
         optimizer.zero_grad()
-        output = model(batch)
+        output, _ = model(batch)
         loss = loss_fn(output, labels)
         loss.backward()
         optimizer.step()
@@ -166,20 +162,30 @@ def train_one_epoch(model, device, loader, optimizer, loss_fn, epoch, log_interv
     return total_loss / max(total_samples, 1)
 
 
-def predict(model, device, loader):
+def predict(model, device, loader, return_attention=False):
     model.eval()
     predictions = []
     labels = []
+    attn_list = [] if return_attention else None
 
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
-            output = model(batch)
+            output, attn_dict = model(batch)
 
             predictions.append(output)
             labels.append(batch.y.view(-1, 1))
 
-    return torch.cat(labels, dim=0), torch.cat(predictions, dim=0)
+            if return_attention:
+                # Move to CPU to avoid GPU memory accumulation
+                attn_list.append({k: v.cpu() for k, v in attn_dict.items()})
+
+    y_all = torch.cat(labels, dim=0)
+    pred_all = torch.cat(predictions, dim=0)
+
+    if return_attention:
+        return y_all, pred_all, attn_list
+    return y_all, pred_all
 
 def main():
     args = parse_args()
@@ -202,12 +208,9 @@ def main():
     print(f'Device: {device}')
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, weight_decay: {args.weight_decay}, epochs: {args.epochs}')
     print(f'Hidden dim: {args.hidden_dim}, dropout: {args.dropout}')
-    print(
-        f'Mol GAT layers: {args.mol_num_layers}; '
-        f'Protein GAT layers: {args.prot_num_layers}'
-    )
+    print(f'Mol GAT layers: {args.mol_num_layers}')
     print('Drug encoder: HierMolGNN (GCN+GAT + per-layer atom→motif)')
-    print('Protein encoder: ESMC contact graph GCN-GAT')
+    print('Interaction: Atom/Motif → dMaSIF surface cross-attention')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = build_model(args).to(device)
@@ -249,12 +252,24 @@ def main():
             f'lr={optimizer.param_groups[0]["lr"]:.2e}'
         )
 
+        # ── Periodic attention save (every 50 epochs) for monitoring ──
+        if epoch % 50 == 0:
+            _, _, attn_val = predict(model, device, val_loader, return_attention=True)
+            attn_val_path = os.path.join(output_dir, f'attn_val_epoch{epoch}.pt')
+            torch.save(attn_val[0], attn_val_path)  # Save first batch only
+            print(f'Saved sample val attention to {attn_val_path}')
+
         if val_metrics[1] < best_mse:
-            y_test, pred_test = predict(model, device, test_loader)
+            # ── Save full test attention at best epoch ──
+            y_test, pred_test, attn_test = predict(
+                model, device, test_loader, return_attention=True
+            )
             test_metrics = compute_metrics_gpu(y_test, pred_test)
 
             checkpoint_path = os.path.join(output_dir, f'ckpt_{args.run_name}_best.pt')
+            attn_test_path = os.path.join(output_dir, f'attn_test_{args.run_name}_best.pt')
             torch.save(model.state_dict(), checkpoint_path)
+            torch.save(attn_test, attn_test_path)
             pd.DataFrame([dict(zip(METRIC_NAMES, test_metrics))]).to_csv(result_path, index=False)
 
             best_mse = val_metrics[1]
@@ -262,6 +277,7 @@ def main():
             best_metrics = test_metrics
             best_checkpoint_path = checkpoint_path
             print(f'Val MSE improved at epoch {epoch}. Saved checkpoint to {checkpoint_path}')
+            print(f'Saved full test attention to {attn_test_path}')
             print('Test metrics:', dict(zip(METRIC_NAMES, test_metrics)))
         else:
             print(f'No improvement. Best epoch: {best_epoch}, best val MSE: {best_mse:.6f}')

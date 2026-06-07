@@ -75,7 +75,8 @@ class HierMolGNN(nn.Module):
                         dim_size=h_m.size(0), reduce="mean"))
 
         return (global_mean_pool(h_a, data["atom"].batch),
-                global_mean_pool(h_m, data["motif"].batch))
+                global_mean_pool(h_m, data["motif"].batch),
+                h_a, h_m, data["atom"].batch, data["motif"].batch)
 
 
 class ProteinGraphEncoder(nn.Module):
@@ -113,7 +114,7 @@ class ProteinGraphEncoder(nn.Module):
         h = self.dropout(F.relu(self.gcn(x, edge_index, edge_weight=edge_weight)))
         for gat in self.gat_layers:
             h = self.dropout(F.relu(gat(h, edge_index)))
-        return global_mean_pool(h, batch)
+        return (global_mean_pool(h, batch), h, batch)
 
 
 class SurfaceEncoder(nn.Module):
