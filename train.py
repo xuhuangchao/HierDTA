@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument('--split_root', type=str, default='data', help='Split csv root')
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
 
-    parser.add_argument('--epochs', type=int, default=250, help='Max training epochs')
+    parser.add_argument('--epochs', type=int, default=300, help='Max training epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
     parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate')
     parser.add_argument('--patience', type=int, default=30, help='Early stopping patience')
@@ -207,6 +207,10 @@ def main():
     print(f'Device: {device}')
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
     print(f'Hidden dim: {args.hidden_dim}, dropout: {args.dropout}')
+    print(
+        f'Mol layers: atom={args.atom_num_layers}, motif={args.motif_num_layers}; '
+        f'Protein GAT layers: {args.prot_num_layers}'
+    )
     print('Protein encoder: ESMC contact graph GCN-GAT')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
@@ -224,6 +228,7 @@ def main():
 
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
     result_path = os.path.join(output_dir, f'result_{args.run_name}.csv')
 
     best_mse = float('inf')
@@ -236,6 +241,7 @@ def main():
             model, device, train_loader, optimizer, loss_fn, epoch,
             args.log_interval
         )
+        scheduler.step()
         y_val, pred_val = predict(model, device, val_loader)
         val_metrics = compute_metrics_gpu(y_val, pred_val)
 

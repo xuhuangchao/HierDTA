@@ -1,0 +1,86 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE and OS files
+.idea/
+.vscode/
+.vs/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+.ipynb_checkpoints/
+.omo/
+
+# Logs and runtime output
+*.log
+logs/
+output/
+outputs/
+runs/
+results/
+checkpoints/
+wandb/
+tensorboard/
+lightning_logs/
+
+# Model weights and serialized training artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.bin
+*.safetensors
+*.pkl
+*.pickle
+*.joblib
+*.npz
+*.npy
+
+# Generated molecular/protein preprocessing artifacts
+data/**/surface_points/
+data/**/surface/
+data/**/*_chem_pretrained.pkl
+data/**/*_protein_pretrained.pkl
+data/**/*.pt
+data/**/*.pth
+data/**/*.ckpt
+data/**/*.npy
+data/**/*.npz
+data/**/*.pkl
+data/**/*.pickle
+
+# Temporary data and backups
+backup_code/
+tmp/
+temp/
+*.tmp
+*.bak
+*.backup
+
+# Archives and large local downloads
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+*.7z
+*.gz
+
+# Keep lightweight dataset metadata and source files trackable.
+!data/**/*.csv
+!data/**/*.pdb

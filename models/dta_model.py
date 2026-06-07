@@ -128,11 +128,11 @@ class DTAFusionHead(nn.Module):
         if fingerprint.dim() == 3:
             fingerprint = fingerprint.squeeze(1)
 
-        drug = self.fp_proj(fingerprint)
+        drug_out = self.fp_proj(fingerprint)
         return self.mlp(torch.cat([
             atom_mol_out,
             motif_mol_out,
-            drug,
+            drug_out,
             protein_out,
             surface,
         ], dim=-1))
