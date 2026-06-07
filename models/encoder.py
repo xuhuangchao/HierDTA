@@ -6,59 +6,84 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import HeteroData
 from torch_geometric.nn import GATConv, GCNConv, global_mean_pool
-from torch_geometric.nn.models import AttentiveFP
+from torch_geometric.utils import scatter
 
 
-class HeteroMolGNN(nn.Module):
-    """Encode fine-grained atom tokens and coarse-grained motif tokens."""
+class HierMolGNN(nn.Module):
+    """Hierarchical molecular GNN with per-layer atom→motif cross-level aggregation.
+
+    Mirrors ProteinGraphEncoder's GCNConv→GATConv pattern. Edge features are
+    mean-reduced to scalar weights (zero parameters). After each message-passing
+    step, atom features are scatter-mean-aggregated into motif features via the
+    atom→motif edge index, creating a proper hierarchical information cascade.
+    """
 
     def __init__(
         self,
         atom_in_dim: int = 37,
         motif_in_dim: int = 50,
-        hidden_dim: int = 256,
-        atom_num_layers: int = 3,
-        motif_num_layers: int = 2,
-        aa_edge_dim: int = 13,
-        mm_edge_dim: int = 37,
-        dropout: float = 0.1,
+        hidden_dim: int = 128,
+        num_layers: int = 3,
+        dropout: float = 0.2,
     ):
         super().__init__()
-        self.atom_encoder = AttentiveFP(
-            in_channels=atom_in_dim,
-            hidden_channels=hidden_dim,
-            out_channels=hidden_dim,
-            edge_dim=aa_edge_dim,
-            num_layers=atom_num_layers,
-            num_timesteps=2,
-            dropout=dropout,
-        )
-        self.motif_encoder = AttentiveFP(
-            in_channels=motif_in_dim,
-            hidden_channels=hidden_dim,
-            out_channels=hidden_dim,
-            edge_dim=mm_edge_dim,
-            num_layers=motif_num_layers,
-            num_timesteps=2,
-            dropout=dropout,
-        )
+        if num_layers < 1:
+            raise ValueError("num_layers must be at least 1")
+
+        # ── Layer 1: weighted GCNConv (projection + convolution, mirrors protein encoder) ──
+        self.atom_gcn = GCNConv(atom_in_dim, hidden_dim)
+        self.motif_gcn = GCNConv(motif_in_dim, hidden_dim)
+
+        # ── Layers 2..N: GATConv (mirrors protein encoder) ──
+        self.atom_gats = nn.ModuleList([
+            GATConv(hidden_dim, hidden_dim)
+            for _ in range(num_layers)
+        ])
+        self.motif_gats = nn.ModuleList([
+            GATConv(hidden_dim, hidden_dim)
+            for _ in range(num_layers)
+        ])
+
+        # ── Cross-level projection (atom → motif, shared across layers) ──
+        self.cross = nn.Linear(hidden_dim, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, data: HeteroData) -> tuple[Tensor, Tensor]:
         aa_ei = data["atom", "bond", "atom"].edge_index
         aa_ea = data["atom", "bond", "atom"].edge_attr
         mm_ei = data["motif", "connects", "motif"].edge_index
         mm_ea = data["motif", "connects", "motif"].edge_attr
-        atom_mol_out = self.atom_encoder(
-            data["atom"].x, aa_ei, aa_ea, data["atom"].batch
-        )
-        motif_mol_out = self.motif_encoder(
-            data["motif"].x, mm_ei, mm_ea, data["motif"].batch
-        )
-        return atom_mol_out, motif_mol_out
+        am_ei = data["atom", "in", "motif"].edge_index
+
+        # Edge features → scalar weights (zero-parameter mean)
+        aa_w = aa_ea.mean(dim=-1)
+        mm_w = mm_ea.mean(dim=-1)
+
+        # ── GCN layer ──
+        h_a = self.dropout(F.relu(self.atom_gcn(data["atom"].x, aa_ei, edge_weight=aa_w)))
+        h_m = self.dropout(F.relu(self.motif_gcn(data["motif"].x, mm_ei, edge_weight=mm_w)))
+        h_m = h_m + self.cross(
+            scatter(h_a[am_ei[0]], am_ei[1], dim=0,
+                    dim_size=h_m.size(0), reduce="mean"))
+
+        # ── GAT layers ──
+        for gat_a, gat_m in zip(self.atom_gats, self.motif_gats):
+            h_a = self.dropout(F.relu(gat_a(h_a, aa_ei)))
+            h_m = self.dropout(F.relu(gat_m(h_m, mm_ei)))
+            h_m = h_m + self.cross(
+                scatter(h_a[am_ei[0]], am_ei[1], dim=0,
+                        dim_size=h_m.size(0), reduce="mean"))
+
+        return (global_mean_pool(h_a, data["atom"].batch),
+                global_mean_pool(h_m, data["motif"].batch))
 
 
 class ProteinGraphEncoder(nn.Module):
-    """Encode full-length ESMC residue nodes following ProteinGraphNet."""
+    """Encode full-length ESMC residue nodes with GCNConv→GATConv stack.
+
+    Simplified from the original ProteinGraphNet: no BatchNorm, only ReLU+Drop
+    after each layer, matching the HierMolGNN and MLPDecoder conventions.
+    """
 
     def __init__(
         self,
@@ -72,14 +97,11 @@ class ProteinGraphEncoder(nn.Module):
             raise ValueError("num_layers must be at least 1")
 
         self.gcn = GCNConv(in_channels=prot_in_dim, out_channels=hidden_dim)
-        self.gcn_bn = nn.BatchNorm1d(hidden_dim)
         self.gat_layers = nn.ModuleList([
-            GATConv(in_channels=hidden_dim, out_channels=hidden_dim, dropout=dropout)
+            GATConv(in_channels=hidden_dim, out_channels=hidden_dim)
             for _ in range(num_layers)
         ])
-        self.gat_bns = nn.ModuleList([
-            nn.BatchNorm1d(hidden_dim) for _ in range(num_layers)
-        ])
+        self.dropout = nn.Dropout(dropout)
 
     def forward(
         self,
@@ -88,32 +110,16 @@ class ProteinGraphEncoder(nn.Module):
         edge_weight: Tensor,
         batch: Tensor,
     ) -> Tensor:
-        # Keep ProteinGraphNet ordering: weighted GCN, then unweighted GAT blocks.
-        h = F.relu(self.gcn(x, edge_index, edge_weight=edge_weight))
-        h = self.gcn_bn(h)
-        for gat, batch_norm in zip(self.gat_layers, self.gat_bns):
-            h = F.relu(gat(h, edge_index))
-            h = batch_norm(h)
-        # Keep ProteinGraphNet's post-pooling MLP while returning a fusion embedding.
-        h = global_mean_pool(h, batch)
-        return h
+        h = self.dropout(F.relu(self.gcn(x, edge_index, edge_weight=edge_weight)))
+        for gat in self.gat_layers:
+            h = self.dropout(F.relu(gat(h, edge_index)))
+        return global_mean_pool(h, batch)
 
 
 class SurfaceEncoder(nn.Module):
-    """Attention-pool valid dMaSIF surface points into one local vector."""
-
-    def __init__(self, in_dim: int = 128, hidden_dim: int = 128, dropout: float = 0.1):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-        )
-        self.score = nn.Linear(hidden_dim, 1)
+    """Mean-pool valid dMaSIF surface points. Zero learnable parameters."""
 
     def forward(self, surface_x: Tensor, surface_mask: Tensor) -> Tensor:
-        h = self.proj(surface_x)
-        scores = self.score(h).squeeze(-1)
-        scores = scores.masked_fill(~surface_mask, float("-inf"))
-        weights = torch.softmax(scores, dim=-1)
-        return torch.sum(h * weights.unsqueeze(-1), dim=1)
+        surface_x = surface_x.masked_fill(~surface_mask.unsqueeze(-1), 0.0)
+        valid_count = surface_mask.sum(dim=1, keepdim=True).float().clamp(min=1)
+        return surface_x.sum(dim=1) / valid_count

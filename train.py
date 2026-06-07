@@ -42,7 +42,8 @@ def parse_args():
 
     parser.add_argument('--epochs', type=int, default=300, help='Max training epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
-    parser.add_argument('--lr', type=float, default=5e-4, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
+    parser.add_argument('--weight_decay', type=float, default=1e-4, help='AdamW weight decay')
     parser.add_argument('--patience', type=int, default=30, help='Early stopping patience')
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     parser.add_argument('--log_interval', type=int, default=20, help='Training log interval')
@@ -53,15 +54,12 @@ def parse_args():
 
     parser.add_argument('--atom_in_dim', type=int, default=37, help='Atom feature dimension')
     parser.add_argument('--motif_in_dim', type=int, default=50, help='Motif feature dimension')
-    parser.add_argument('--aa_edge_dim', type=int, default=13, help='Atom-atom edge dimension')
-    parser.add_argument('--mm_edge_dim', type=int, default=37, help='Motif-motif edge dimension')
-    parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom AttentiveFP layers')
-    parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif AttentiveFP layers')
+    parser.add_argument('--mol_num_layers', type=int, default=2, help='Molecular GAT layers after initial GCN')
 
     parser.add_argument('--prot_in_dim', type=int, default=1152, help='ESMC residue feature dimension')
     parser.add_argument('--prot_num_layers', type=int, default=2, help='Protein GAT layers after the initial GCN')
     parser.add_argument('--fp_in_dim', type=int, default=1024, help='Fingerprint dimension')
-    parser.add_argument('--run_name', type=str, default='hisurf_dta', help='Output filename suffix')
+    parser.add_argument('--run_name', type=str, default='inter', help='Output filename suffix')
 
     return parser.parse_args()
 
@@ -119,10 +117,7 @@ def build_model(args):
         dropout=args.dropout,
         atom_in_dim=args.atom_in_dim,
         motif_in_dim=args.motif_in_dim,
-        aa_edge_dim=args.aa_edge_dim,
-        mm_edge_dim=args.mm_edge_dim,
-        atom_num_layers=args.atom_num_layers,
-        motif_num_layers=args.motif_num_layers,
+        mol_num_layers=args.mol_num_layers,
         prot_in_dim=args.prot_in_dim,
         prot_num_layers=args.prot_num_layers,
         fp_in_dim=args.fp_in_dim,
@@ -205,12 +200,13 @@ def main():
     print(f'Dataset: {dataset}')
     print(f'Strategy: {args.strategy}, seed: {args.seed}')
     print(f'Device: {device}')
-    print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
+    print(f'Batch size: {args.batch_size}, lr: {args.lr}, weight_decay: {args.weight_decay}, epochs: {args.epochs}')
     print(f'Hidden dim: {args.hidden_dim}, dropout: {args.dropout}')
     print(
-        f'Mol layers: atom={args.atom_num_layers}, motif={args.motif_num_layers}; '
+        f'Mol GAT layers: {args.mol_num_layers}; '
         f'Protein GAT layers: {args.prot_num_layers}'
     )
+    print('Drug encoder: HierMolGNN (GCN+GAT + per-layer atom→motif)')
     print('Protein encoder: ESMC contact graph GCN-GAT')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
@@ -227,8 +223,10 @@ def main():
     test_loader = build_loader(test_data, args, shuffle=False)
 
     loss_fn = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.999))
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=args.lr, betas=(0.9, 0.999),
+        weight_decay=args.weight_decay,
+    )
     result_path = os.path.join(output_dir, f'result_{args.run_name}.csv')
 
     best_mse = float('inf')
@@ -241,7 +239,6 @@ def main():
             model, device, train_loader, optimizer, loss_fn, epoch,
             args.log_interval
         )
-        scheduler.step()
         y_val, pred_val = predict(model, device, val_loader)
         val_metrics = compute_metrics_gpu(y_val, pred_val)
 

@@ -1,2 +1,2 @@
-from .encoder import HeteroMolGNN, ProteinGraphEncoder, SurfaceEncoder
-from .dta_model import DTAFusionHead, DTAModel
+from .encoder import HierMolGNN, ProteinGraphEncoder, SurfaceEncoder
+from .dta_model import DTAInteractionHead, DTAModel

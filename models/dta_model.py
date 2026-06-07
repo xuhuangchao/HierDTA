@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import Batch, Data, HeteroData
 
-from .encoder import HeteroMolGNN, ProteinGraphEncoder, SurfaceEncoder
+from .encoder import HierMolGNN, ProteinGraphEncoder, SurfaceEncoder
 
 
 class DTABatch:
@@ -83,17 +83,23 @@ class MLPDecoder(nn.Module):
         super().__init__()
         self.fc1 = nn.Linear(in_dim, hidden_dim1)
         self.fc2 = nn.Linear(hidden_dim1, hidden_dim2)
-        self.fc4 = nn.Linear(hidden_dim2, binary)
+        self.fc3 = nn.Linear(hidden_dim2, binary)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.dropout(F.relu(self.fc1(x)))
         x = self.dropout(F.relu(self.fc2(x)))
-        return self.fc4(x)
+        return self.fc3(x)
 
 
-class DTAFusionHead(nn.Module):
-    """Concatenate the five graph, fingerprint, and surface views for prediction."""
+class DTAInteractionHead(nn.Module):
+    """Fuse drug and protein views with intra-modal attention.
+
+    Drug side: attention-weighted fusion of [atom_mol, motif_mol] → drug_repr [d]
+    Protein side: attention-weighted fusion of [protein_out, surface] → prot_repr [d]
+    Precomputed features: fp_proj [d] + esm_proj [d] concatenated at the final stage.
+    Final: [drug_repr, prot_repr, fp_proj, esm_proj, drug_repr⊙prot_repr] → MLP → affinity
+    """
 
     def __init__(
         self,
@@ -101,18 +107,40 @@ class DTAFusionHead(nn.Module):
         num_tasks: int = 1,
         dropout: float = 0.2,
         fp_in_dim: int = 1024,
+        esm_dim: int = 1152,
     ):
         super().__init__()
+        # ── Drug side: 2-view attention (atom + motif) ──
+        self.drug_view_attn = nn.Sequential(
+            nn.Linear(d, d // 4),
+            nn.ReLU(),
+            nn.Linear(d // 4, 1),
+        )
+
+        # ── Protein side: 2-view attention (protein_out + surface) ──
+        self.prot_view_attn = nn.Sequential(
+            nn.Linear(d, d // 4),
+            nn.ReLU(),
+            nn.Linear(d // 4, 1),
+        )
+
+        # ── Precomputed feature projections ──
         self.fp_proj = nn.Sequential(
-            nn.Linear(fp_in_dim, 512),
+            nn.Linear(fp_in_dim, d),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(512, d),
         )
+        self.esm_proj = nn.Sequential(
+            nn.Linear(esm_dim, d),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+
+        # ── Final prediction: 5d input (drug_repr + prot_repr + fp + esm + interaction) ──
         self.mlp = MLPDecoder(
             in_dim=5 * d,
-            hidden_dim1=512,
-            hidden_dim2=256,
+            hidden_dim1=2 * d,
+            hidden_dim2=d,
             binary=num_tasks,
             dropout=dropout,
         )
@@ -124,22 +152,34 @@ class DTAFusionHead(nn.Module):
         protein_out: Tensor,
         fingerprint: Tensor,
         surface: Tensor,
+        esm_global: Tensor,
     ) -> Tensor:
         if fingerprint.dim() == 3:
             fingerprint = fingerprint.squeeze(1)
 
-        drug_out = self.fp_proj(fingerprint)
-        return self.mlp(torch.cat([
-            atom_mol_out,
-            motif_mol_out,
-            drug_out,
-            protein_out,
-            surface,
-        ], dim=-1))
+        # ── Drug fusion: attention over 2 GNN views ──
+        drug_views = torch.stack([atom_mol_out, motif_mol_out], dim=1)  # [B, 2, d]
+        drug_w = F.softmax(self.drug_view_attn(drug_views).squeeze(-1), dim=-1)   # [B, 2]
+        drug_repr = (drug_views * drug_w.unsqueeze(-1)).sum(dim=1)                  # [B, d]
+
+        # ── Protein fusion: attention over 2 learned views ──
+        prot_views = torch.stack([protein_out, surface], dim=1)        # [B, 2, d]
+        prot_w = F.softmax(self.prot_view_attn(prot_views).squeeze(-1), dim=-1)     # [B, 2]
+        prot_repr = (prot_views * prot_w.unsqueeze(-1)).sum(dim=1)                    # [B, d]
+
+        # ── Precomputed high-level features (direct, no attention) ──
+        fp = self.fp_proj(fingerprint)                                                # [B, d]
+        esm = self.esm_proj(esm_global)                                               # [B, d]
+
+        # ── Explicit interaction signal ──
+        interaction = drug_repr * prot_repr                                           # [B, d]
+
+        # ── Final: concatenate all 5 components ──
+        return self.mlp(torch.cat([drug_repr, prot_repr, fp, esm, interaction], dim=-1))  # [B, 5d]
 
 
 class DTAModel(nn.Module):
-    """DTA model that concatenates five molecular and protein views."""
+    """DTA model with hierarchical drug GNN and GCNConv→GATConv protein encoder."""
 
     def __init__(
         self,
@@ -149,24 +189,19 @@ class DTAModel(nn.Module):
         dropout: float = 0.1,
         atom_in_dim: int = 37,
         motif_in_dim: int = 50,
-        aa_edge_dim: int = 13,
-        mm_edge_dim: int = 37,
-        atom_num_layers: int = 3,
-        motif_num_layers: int = 2,
+        mol_num_layers: int = 2,
         prot_in_dim: int = 1152,
-        prot_num_layers: int = 4,
+        prot_num_layers: int = 2,
         fp_in_dim: int = 1024,
+        esm_dim: int = 1152,
     ):
         super().__init__()
         self.task = task
-        self.drug_encoder = HeteroMolGNN(
+        self.drug_encoder = HierMolGNN(
             atom_in_dim=atom_in_dim,
             motif_in_dim=motif_in_dim,
             hidden_dim=hidden_dim,
-            atom_num_layers=atom_num_layers,
-            motif_num_layers=motif_num_layers,
-            aa_edge_dim=aa_edge_dim,
-            mm_edge_dim=mm_edge_dim,
+            num_layers=mol_num_layers,
             dropout=dropout,
         )
         self.prot_encoder = ProteinGraphEncoder(
@@ -175,16 +210,13 @@ class DTAModel(nn.Module):
             num_layers=prot_num_layers,
             dropout=dropout,
         )
-        self.surface_encoder = SurfaceEncoder(
-            in_dim=128,
-            hidden_dim=hidden_dim,
-            dropout=dropout,
-        )
-        self.fusion_head = DTAFusionHead(
+        self.surface_encoder = SurfaceEncoder()
+        self.fusion_head = DTAInteractionHead(
             d=hidden_dim,
             num_tasks=num_tasks,
             dropout=dropout,
             fp_in_dim=fp_in_dim,
+            esm_dim=esm_dim,
         )
 
     def forward(self, data: DTABatch) -> Tensor:
@@ -197,6 +229,7 @@ class DTAModel(nn.Module):
             protein_out=protein_out,
             fingerprint=data.fingerprint,
             surface=surface,
+            esm_global=data.esm_global,
         )
 
     def encode_drug(self, data: DTABatch):
