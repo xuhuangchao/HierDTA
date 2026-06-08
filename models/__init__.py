@@ -1,2 +1,2 @@
-from .encoder import HierMolGNN
-from .dta_model import DTASurfaceCrossHead, DTAModel
+from .encoder import AtomGNN, PocketGraphEncoder
+from .dta_model import DTAPocketCrossHead, DTAModel

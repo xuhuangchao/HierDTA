@@ -7,6 +7,7 @@ do
     --gpu_idx 1 \
     --strategy unseen_drug \
     --seed "${seed}" \
-    --run_name hisurf_dta \
+    --run_name 0608_10A_egnn608_both \
     "$@"
 done
+

@@ -5,122 +5,63 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import HeteroData
-from torch_geometric.nn import GATConv, GCNConv, global_mean_pool
+from torch_geometric.nn import GATv2Conv, global_mean_pool
 from torch_geometric.utils import scatter
 
+from .egnn_clean import EGNN
 
-class HierMolGNN(nn.Module):
-    """Hierarchical molecular GNN with per-layer atom→motif cross-level aggregation.
 
-    Mirrors ProteinGraphEncoder's GCNConv→GATConv pattern. Edge features are
-    mean-reduced to scalar weights (zero parameters). After each message-passing
-    step, atom features are scatter-mean-aggregated into motif features via the
-    atom→motif edge index, creating a proper hierarchical information cascade.
+# ── 1. 分子 GNN (通用: atom / motif) ──
+class AtomGNN(nn.Module):
+    """Molecular graph encoder — works for both atom-bond and motif-connect graphs.
+
+    node_key / edge_key determine which HeteroData fields are consumed,
+    making the same class reusable for atom-level and motif-level encoding.
     """
-
-    def __init__(
-        self,
-        atom_in_dim: int = 37,
-        motif_in_dim: int = 50,
-        hidden_dim: int = 128,
-        num_layers: int = 3,
-        dropout: float = 0.2,
-    ):
+    def __init__(self, in_dim=37, hidden_dim=128, edge_dim=13, num_layers=2, dropout=0.2,
+                 node_key="atom", edge_key=("atom", "bond", "atom")):
         super().__init__()
-        if num_layers < 1:
-            raise ValueError("num_layers must be at least 1")
+        self.node_key = node_key
+        self.edge_key = edge_key
+        self.conv1 = GATv2Conv(in_dim, hidden_dim, edge_dim=edge_dim, dropout=dropout)
+        self.conv2 = GATv2Conv(hidden_dim, hidden_dim, edge_dim=edge_dim, dropout=dropout)
 
-        # ── Layer 1: weighted GCNConv (projection + convolution, mirrors protein encoder) ──
-        self.atom_gcn = GCNConv(atom_in_dim, hidden_dim)
-        self.motif_gcn = GCNConv(motif_in_dim, hidden_dim)
+    def forward(self, data):
+        x = data[self.node_key].x
+        ei = data[self.edge_key].edge_index
+        ea = data[self.edge_key].edge_attr
 
-        # ── Layers 2..N: GATConv (mirrors protein encoder) ──
-        self.atom_gats = nn.ModuleList([
-            GATConv(hidden_dim, hidden_dim)
-            for _ in range(num_layers)
-        ])
-        self.motif_gats = nn.ModuleList([
-            GATConv(hidden_dim, hidden_dim)
-            for _ in range(num_layers)
-        ])
+        x = F.relu(self.conv1(x, ei, edge_attr=ea))
+        x = F.relu(self.conv2(x, ei, edge_attr=ea))
 
-        # ── Cross-level projection (atom → motif, shared across layers) ──
-        self.cross = nn.Linear(hidden_dim, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, data: HeteroData) -> tuple[Tensor, Tensor]:
-        aa_ei = data["atom", "bond", "atom"].edge_index
-        aa_ea = data["atom", "bond", "atom"].edge_attr
-        mm_ei = data["motif", "connects", "motif"].edge_index
-        mm_ea = data["motif", "connects", "motif"].edge_attr
-        am_ei = data["atom", "in", "motif"].edge_index
-
-        # Edge features → scalar weights (zero-parameter mean)
-        aa_w = aa_ea.mean(dim=-1)
-        mm_w = mm_ea.mean(dim=-1)
-
-        # ── GCN layer ──
-        h_a = self.dropout(F.relu(self.atom_gcn(data["atom"].x, aa_ei, edge_weight=aa_w)))
-        h_m = self.dropout(F.relu(self.motif_gcn(data["motif"].x, mm_ei, edge_weight=mm_w)))
-        h_m = h_m + self.cross(
-            scatter(h_a[am_ei[0]], am_ei[1], dim=0,
-                    dim_size=h_m.size(0), reduce="mean"))
-
-        # ── GAT layers ──
-        for gat_a, gat_m in zip(self.atom_gats, self.motif_gats):
-            h_a = self.dropout(F.relu(gat_a(h_a, aa_ei)))
-            h_m = self.dropout(F.relu(gat_m(h_m, mm_ei)))
-            h_m = h_m + self.cross(
-                scatter(h_a[am_ei[0]], am_ei[1], dim=0,
-                        dim_size=h_m.size(0), reduce="mean"))
-
-        return (global_mean_pool(h_a, data["atom"].batch),
-                global_mean_pool(h_m, data["motif"].batch),
-                h_a, h_m, data["atom"].batch, data["motif"].batch)
+        return x, data[self.node_key].batch
 
 
-class ProteinGraphEncoder(nn.Module):
-    """Encode full-length ESMC residue nodes with GCNConv→GATConv stack.
+# ── 2. 口袋残基编码器 (EGNN) ──
+class PocketGraphEncoder(nn.Module):
+    """Pocket residue encoder with E(n) Equivariant GNN.
 
-    Simplified from the original ProteinGraphNet: no BatchNorm, only ReLU+Drop
-    after each layer, matching the HierMolGNN and MLPDecoder conventions.
+    EGNN updates both residue features and Cα coordinates through
+    message passing.  The coordinate-update mechanism preserves 3D
+    spatial structure; edges are distance-filtered (5A cutoff from
+    data pipeline) to keep computation tractable.
     """
-
-    def __init__(
-        self,
-        prot_in_dim: int = 1152,
-        hidden_dim: int = 128,
-        num_layers: int = 2,
-        dropout: float = 0.2,
-    ):
+    def __init__(self, pocket_in_dim=649, hidden_dim=128, num_layers=2, dropout=0.2):
         super().__init__()
-        if num_layers < 1:
-            raise ValueError("num_layers must be at least 1")
+        self.egnn = EGNN(
+            in_node_nf=pocket_in_dim,
+            hidden_nf=hidden_dim,
+            out_node_nf=hidden_dim,
+            in_edge_nf=2,           # [min_dist*0.1, max_dist*0.1]
+            n_layers=num_layers,
+            residual=True,
+            normalize=True,
+            tanh=False,
+        )
+        # self.dropout = nn.Dropout(dropout)
 
-        self.gcn = GCNConv(in_channels=prot_in_dim, out_channels=hidden_dim)
-        self.gat_layers = nn.ModuleList([
-            GATConv(in_channels=hidden_dim, out_channels=hidden_dim)
-            for _ in range(num_layers)
-        ])
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        x: Tensor,
-        edge_index: Tensor,
-        edge_weight: Tensor,
-        batch: Tensor,
-    ) -> Tensor:
-        h = self.dropout(F.relu(self.gcn(x, edge_index, edge_weight=edge_weight)))
-        for gat in self.gat_layers:
-            h = self.dropout(F.relu(gat(h, edge_index)))
-        return (global_mean_pool(h, batch), h, batch)
-
-
-class SurfaceEncoder(nn.Module):
-    """Mean-pool valid dMaSIF surface points. Zero learnable parameters."""
-
-    def forward(self, surface_x: Tensor, surface_mask: Tensor) -> Tensor:
-        surface_x = surface_x.masked_fill(~surface_mask.unsqueeze(-1), 0.0)
-        valid_count = surface_mask.sum(dim=1, keepdim=True).float().clamp(min=1)
-        return surface_x.sum(dim=1) / valid_count
+    def forward(self, x, edge_index, edge_attr, coords, batch):
+        # x = self.dropout(x)
+        h, _ = self.egnn(x, coords, edge_index, edge_attr=edge_attr)
+        return h, batch
+    

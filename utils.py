@@ -9,22 +9,22 @@ import torch
 
 
 def load_global_features(dataset_name, cache_dir='data/cache'):
-    """Load dataset-wide drug and protein caches once for sharing across splits."""
+    """Load dataset-wide drug and pocket caches once for sharing across splits."""
     print(f'Loading global caches from {cache_dir} for dataset {dataset_name}...')
     drug_features = torch.load(
         f'{cache_dir}/{dataset_name}_drug_features.pt', weights_only=False
     )
-    protein_features = torch.load(
-        f'{cache_dir}/{dataset_name}_protein_features.pt', weights_only=False
+    pocket_features = torch.load(
+        f'{cache_dir}/{dataset_name}_pocket_graphs.pt', weights_only=False
     )
     print('Global caches loaded.')
-    return drug_features, protein_features
+    return drug_features, pocket_features
 
 
 class TestbedDatasetHMol(Dataset):
     def __init__(self, xd=None, xt=None, y=None, transform=None,
                  dataset_name=None, cache_dir='data/cache',
-                 drug_features=None, protein_features=None):
+                 drug_features=None, pocket_features=None):
         self.xd = xd
         self.xt = xt
         self.y = y
@@ -36,12 +36,12 @@ class TestbedDatasetHMol(Dataset):
         assert self.dataset_name is not None, "Must provide dataset_name"
 
         # Reuse dataset-wide caches across train/valid/test when provided.
-        if drug_features is None or protein_features is None:
-            drug_features, protein_features = load_global_features(
+        if drug_features is None or pocket_features is None:
+            drug_features, pocket_features = load_global_features(
                 self.dataset_name, self.cache_dir
             )
         self.drug_features = drug_features
-        self.protein_features = protein_features
+        self.pocket_features = pocket_features
         print('Assembling data pairs...')
 
         self.data_list = []
@@ -74,21 +74,22 @@ class TestbedDatasetHMol(Dataset):
             hetero['motif', 'connects', 'motif'].edge_index = torch.LongTensor(hg['mm_edge_index'])
             hetero['motif', 'connects', 'motif'].edge_attr = torch.FloatTensor(hg['mm_edge_attr'])
 
-            # Full-length ESMC contact graph and independent dMaSIF surface view.
-            protein_data = self.protein_features[key]
-
-            protein_graph = DATA.Data(
-                x=torch.FloatTensor(protein_data['x']),
-                edge_index=torch.LongTensor(protein_data['edge_index']),
-                edge_weight=torch.FloatTensor(protein_data['edge_weight']),
+            # Pocket residue graph from data/cache/{dataset}_pocket_graphs.pt.
+            pocket_data = self.pocket_features[key]
+            ei = torch.as_tensor(pocket_data['edge_index'], dtype=torch.int64)
+            ea = torch.as_tensor(pocket_data['edge_weight'], dtype=torch.float32)
+            pocket_graph = DATA.Data(
+                x=torch.as_tensor(pocket_data['node_features'], dtype=torch.float32),
+                edge_index=ei,
+                edge_attr=ea,
+                coords=torch.as_tensor(pocket_data['residue_coords'], dtype=torch.float32),
             )
 
             data = DATA.Data(
                 hetero=hetero,
-                protein_graph=protein_graph,
-                surface_embedding=protein_data['surface_embedding'].float(),
-                fingerprint=torch.FloatTensor([drug_data['fingerprint']]),
-                esm_global=torch.FloatTensor([protein_data['esm_global']]),
+                pocket_graph=pocket_graph,
+                fingerprint=torch.as_tensor(drug_data['fingerprint'], dtype=torch.float32).unsqueeze(0),
+                esm_global=torch.as_tensor(pocket_data['esm_global'], dtype=torch.float32).unsqueeze(0),
                 smiles=smiles,
                 key=key,
                 y=torch.FloatTensor([labels]),

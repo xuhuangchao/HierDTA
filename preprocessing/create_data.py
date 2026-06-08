@@ -32,22 +32,31 @@ def build_mol_hetero_dict(smiles):
 
 
 def target2graph(contact_map, protein_features, threshold=CONTACT_THRESHOLD):
-    """Build the full-length protein graph following backup_code/MyDataset.py."""
+    """Build the full-length protein graph from ESM2 contact probabilities.
+
+    Self-loops and sequential-neighbour edges are FORCED to 1.0:
+    - Without them, 300-node graphs at ESM2 threshold=0.5 have ~0.6% density
+      (~2 edges/node), starving GAT of message-passing paths.
+    - Self-loops prevent attention normalisation collapse.
+    - Sequential edges create a backbone along the chain so information can
+      propagate even where ESM2 predicts no long-range contact.
+    """
     residue_features = protein_features[1:-1].astype(np.float32)
     target_size = residue_features.shape[0]
     contact_map = contact_map[:target_size, :target_size].copy()
 
     for i in range(target_size):
-        contact_map[i, i] = 1
+        contact_map[i, i] = 1.0
         if i + 1 < target_size:
-            contact_map[i, i + 1] = 1
+            contact_map[i, i + 1] = 1.0
 
     src, dst = np.where(contact_map >= threshold)
     edge_index = np.array([src, dst], dtype=np.int64)
     edge_weight = contact_map[src, dst].astype(np.float32)
     print(
         f"  residue_features shape: {residue_features.shape}, "
-        f"edge_index shape: {edge_index.shape}"
+        f"edge_index shape: {edge_index.shape}, "
+        f"density: {edge_index.shape[1] / (target_size * (target_size - 1)) * 100:.1f}%"
     )
     return residue_features, edge_index, edge_weight
 

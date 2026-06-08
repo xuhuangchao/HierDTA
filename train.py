@@ -54,9 +54,8 @@ def parse_args():
 
     parser.add_argument('--atom_in_dim', type=int, default=37, help='Atom feature dimension')
     parser.add_argument('--motif_in_dim', type=int, default=50, help='Motif feature dimension')
-    parser.add_argument('--mol_num_layers', type=int, default=2, help='Molecular GAT layers after initial GCN')
-
-    parser.add_argument('--fp_in_dim', type=int, default=1024, help='Fingerprint dimension')
+    parser.add_argument('--pocket_feat_dim', type=int, default=608, help='Pocket residue node feature dimension')
+    parser.add_argument('--pocket_num_layers', type=int, default=2, help='Pocket GNN layers')
     parser.add_argument('--run_name', type=str, default='inter', help='Output filename suffix')
 
     return parser.parse_args()
@@ -83,7 +82,7 @@ def read_split_csv(args, dataset, split):
     return list(df['compound_iso_smiles']), list(df['target_key']), list(df['affinity'])
 
 
-def build_dataset(args, dataset, split, drug_features, protein_features):
+def build_dataset(args, dataset, split, drug_features, pocket_features):
     drugs, prots, labels = read_split_csv(args, dataset, split)
     return TestbedDatasetHMol(
         xd=drugs,
@@ -92,7 +91,7 @@ def build_dataset(args, dataset, split, drug_features, protein_features):
         dataset_name=dataset,
         cache_dir=args.cache_dir,
         drug_features=drug_features,
-        protein_features=protein_features,
+        pocket_features=pocket_features,
     )
 
 
@@ -115,8 +114,8 @@ def build_model(args):
         dropout=args.dropout,
         atom_in_dim=args.atom_in_dim,
         motif_in_dim=args.motif_in_dim,
-        mol_num_layers=args.mol_num_layers,
-        fp_in_dim=args.fp_in_dim,
+        pocket_feat_dim=args.pocket_feat_dim,
+        pocket_num_layers=args.pocket_num_layers,
     )
 
 
@@ -142,7 +141,9 @@ def train_one_epoch(model, device, loader, optimizer, loss_fn, epoch, log_interv
         labels = batch.y.view(-1, 1).float()
 
         optimizer.zero_grad()
-        output, _ = model(batch)
+        output = model(batch)
+        if isinstance(output, tuple):
+            output, _ = output
         loss = loss_fn(output, labels)
         loss.backward()
         optimizer.step()
@@ -162,30 +163,19 @@ def train_one_epoch(model, device, loader, optimizer, loss_fn, epoch, log_interv
     return total_loss / max(total_samples, 1)
 
 
-def predict(model, device, loader, return_attention=False):
+def predict(model, device, loader):
     model.eval()
     predictions = []
     labels = []
-    attn_list = [] if return_attention else None
 
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
-            output, attn_dict = model(batch)
-
+            output = model(batch)
             predictions.append(output)
             labels.append(batch.y.view(-1, 1))
 
-            if return_attention:
-                # Move to CPU to avoid GPU memory accumulation
-                attn_list.append({k: v.cpu() for k, v in attn_dict.items()})
-
-    y_all = torch.cat(labels, dim=0)
-    pred_all = torch.cat(predictions, dim=0)
-
-    if return_attention:
-        return y_all, pred_all, attn_list
-    return y_all, pred_all
+    return torch.cat(labels, dim=0), torch.cat(predictions, dim=0)
 
 def main():
     args = parse_args()
@@ -208,18 +198,15 @@ def main():
     print(f'Device: {device}')
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, weight_decay: {args.weight_decay}, epochs: {args.epochs}')
     print(f'Hidden dim: {args.hidden_dim}, dropout: {args.dropout}')
-    print(f'Mol GAT layers: {args.mol_num_layers}')
-    print('Drug encoder: HierMolGNN (GCN+GAT + per-layer atom→motif)')
-    print('Interaction: Atom/Motif → dMaSIF surface cross-attention')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = build_model(args).to(device)
     print('Parameter counts:', model.count_parameters())
 
-    drug_features, protein_features = load_global_features(dataset, args.cache_dir)
-    train_data = build_dataset(args, dataset, 'train', drug_features, protein_features)
-    val_data = build_dataset(args, dataset, 'valid', drug_features, protein_features)
-    test_data = build_dataset(args, dataset, 'test', drug_features, protein_features)
+    drug_features, pocket_features = load_global_features(dataset, args.cache_dir)
+    train_data = build_dataset(args, dataset, 'train', drug_features, pocket_features)
+    val_data = build_dataset(args, dataset, 'valid', drug_features, pocket_features)
+    test_data = build_dataset(args, dataset, 'test', drug_features, pocket_features)
 
     train_loader = build_loader(train_data, args, shuffle=True)
     val_loader = build_loader(val_data, args, shuffle=False)
@@ -252,24 +239,12 @@ def main():
             f'lr={optimizer.param_groups[0]["lr"]:.2e}'
         )
 
-        # ── Periodic attention save (every 50 epochs) for monitoring ──
-        if epoch % 50 == 0:
-            _, _, attn_val = predict(model, device, val_loader, return_attention=True)
-            attn_val_path = os.path.join(output_dir, f'attn_val_epoch{epoch}.pt')
-            torch.save(attn_val[0], attn_val_path)  # Save first batch only
-            print(f'Saved sample val attention to {attn_val_path}')
-
         if val_metrics[1] < best_mse:
-            # ── Save full test attention at best epoch ──
-            y_test, pred_test, attn_test = predict(
-                model, device, test_loader, return_attention=True
-            )
+            y_test, pred_test = predict(model, device, test_loader)
             test_metrics = compute_metrics_gpu(y_test, pred_test)
 
             checkpoint_path = os.path.join(output_dir, f'ckpt_{args.run_name}_best.pt')
-            attn_test_path = os.path.join(output_dir, f'attn_test_{args.run_name}_best.pt')
             torch.save(model.state_dict(), checkpoint_path)
-            torch.save(attn_test, attn_test_path)
             pd.DataFrame([dict(zip(METRIC_NAMES, test_metrics))]).to_csv(result_path, index=False)
 
             best_mse = val_metrics[1]
@@ -277,7 +252,6 @@ def main():
             best_metrics = test_metrics
             best_checkpoint_path = checkpoint_path
             print(f'Val MSE improved at epoch {epoch}. Saved checkpoint to {checkpoint_path}')
-            print(f'Saved full test attention to {attn_test_path}')
             print('Test metrics:', dict(zip(METRIC_NAMES, test_metrics)))
         else:
             print(f'No improvement. Best epoch: {best_epoch}, best val MSE: {best_mse:.6f}')
