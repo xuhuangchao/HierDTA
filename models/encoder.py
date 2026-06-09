@@ -23,16 +23,19 @@ class AtomGNN(nn.Module):
         super().__init__()
         self.node_key = node_key
         self.edge_key = edge_key
-        self.conv1 = GATv2Conv(in_dim, hidden_dim, edge_dim=edge_dim, dropout=dropout)
-        self.conv2 = GATv2Conv(hidden_dim, hidden_dim, edge_dim=edge_dim, dropout=dropout)
+        self.convs = nn.ModuleList([
+            GATv2Conv(in_dim if i == 0 else hidden_dim, hidden_dim,
+                      edge_dim=edge_dim, dropout=dropout)
+            for i in range(num_layers)
+        ])
 
     def forward(self, data):
         x = data[self.node_key].x
         ei = data[self.edge_key].edge_index
         ea = data[self.edge_key].edge_attr
 
-        x = F.relu(self.conv1(x, ei, edge_attr=ea))
-        x = F.relu(self.conv2(x, ei, edge_attr=ea))
+        for conv in self.convs:
+            x = F.relu(conv(x, ei, edge_attr=ea))
 
         return x, data[self.node_key].batch
 

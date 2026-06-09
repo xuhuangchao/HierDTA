@@ -42,7 +42,7 @@ def parse_args():
 
     parser.add_argument('--epochs', type=int, default=300, help='Max training epochs')
     parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
-    parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
+    parser.add_argument('--lr', type=float, default=5e-4, help='Peak learning rate')
     parser.add_argument('--weight_decay', type=float, default=1e-4, help='AdamW weight decay')
     parser.add_argument('--patience', type=int, default=30, help='Early stopping patience')
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
@@ -56,6 +56,8 @@ def parse_args():
     parser.add_argument('--motif_in_dim', type=int, default=50, help='Motif feature dimension')
     parser.add_argument('--pocket_feat_dim', type=int, default=608, help='Pocket residue node feature dimension')
     parser.add_argument('--pocket_num_layers', type=int, default=2, help='Pocket GNN layers')
+    parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom GNN layers')
+    parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif GNN layers')
     parser.add_argument('--run_name', type=str, default='inter', help='Output filename suffix')
 
     return parser.parse_args()
@@ -116,6 +118,8 @@ def build_model(args):
         motif_in_dim=args.motif_in_dim,
         pocket_feat_dim=args.pocket_feat_dim,
         pocket_num_layers=args.pocket_num_layers,
+        atom_num_layers=args.atom_num_layers,
+        motif_num_layers=args.motif_num_layers,
     )
 
 
@@ -217,6 +221,7 @@ def main():
         model.parameters(), lr=args.lr, betas=(0.9, 0.999),
         weight_decay=args.weight_decay,
     )
+
     result_path = os.path.join(output_dir, f'result_{args.run_name}.csv')
 
     best_mse = float('inf')

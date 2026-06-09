@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.data import Batch, Data, HeteroData
-from torch_geometric.nn import global_max_pool
+from torch_geometric.nn import global_max_pool, global_mean_pool
 from torch_geometric.utils import to_dense_batch
 
 from .encoder import AtomGNN, PocketGraphEncoder
@@ -21,6 +21,8 @@ class DTABatch:
         "pocket_graph",
         "fingerprint",
         "esm_global",
+        "chemberta_tokens",  # [B, max_tokens, 384] padded
+        "chemberta_mask",    # [B, max_tokens] bool
         "y",
         "smiles",
         "key",
@@ -50,6 +52,8 @@ def dta_collate_fn(data_list: List[Any]) -> DTABatch:
         pocket_graph=Batch.from_data_list([data.pocket_graph for data in data_list]),
         fingerprint=torch.cat([data.fingerprint for data in data_list], dim=0),
         esm_global=torch.cat([data.esm_global for data in data_list], dim=0),
+        chemberta_tokens=torch.stack([data.chemberta_tokens for data in data_list]),
+        chemberta_mask=torch.stack([data.chemberta_mask for data in data_list]),
         y=torch.cat([data.y for data in data_list], dim=0),
         smiles=[getattr(data, "smiles", "") for data in data_list],
         key=[getattr(data, "key", "") for data in data_list],
@@ -78,69 +82,66 @@ class MLPDecoder(nn.Module):
 
 
 
-# ── 3. Dual-Interaction 预测头 ──
-class DTAPocketCrossHead(nn.Module):
-    """Atom + Motif → Protein interaction with learned per-residue fusion.
+# ── 3. 双向交互模块 ──
+class BiDirectionalInteraction(nn.Module):
+    """Bidirectional cross-attention: drug ⇄ protein.
 
-    Atom and motif votes are concatenated (not averaged) and fused by a
-    1×1 convolution — each pocket residue gets its own atom/motif blend.
-    This preserves both signals rather than diluting motif through averaging
-    with overlapping atom copies.
+    Two outputs per interaction: drug_context (drug aware of protein)
+    and prot_context (protein aware of drug).  Separate Q/K projections
+    for richer expressivity.
     """
-    def __init__(self, emb_dim=128, fp_dim=1024, esm_dim=480, dropout=0.2):
+    def __init__(self, emb_dim=128):
         super().__init__()
+        self.scale = emb_dim ** -0.5
+        self.shared_proj = nn.Linear(emb_dim, emb_dim)
+
+    def forward(self, drug_feat, d_mask, prot_feat, p_mask):
+        Q = self.shared_proj(drug_feat)
+        K = self.shared_proj(prot_feat)
+        attn = torch.bmm(Q, K.transpose(1, 2)) * self.scale
+        attn = attn.masked_fill(~(d_mask.unsqueeze(2) & p_mask.unsqueeze(1)), -1e9)
+
+        # Drug-aware protein: each residue attends to drug atoms
+        drug_context = torch.bmm(F.softmax(attn, dim=2), prot_feat)
+        drug_interacted = (drug_context * d_mask.unsqueeze(-1)).sum(1) \
+                          / d_mask.sum(1).clamp_min(1).unsqueeze(-1)
+
+        # Protein-aware drug: each atom attends to protein residues
+        prot_context = torch.bmm(F.softmax(attn.transpose(1, 2), dim=2), drug_feat)
+        prot_interacted = (prot_context * p_mask.unsqueeze(-1)).sum(1) \
+                          / p_mask.sum(1).clamp_min(1).unsqueeze(-1)
+
+        return drug_interacted, prot_interacted
+
+
+
+# ── 5. 双路径预测头 ──
+class DTAPocketCrossHead(nn.Module):
+    """Atom ⇄ EGNN bidirectional interaction + fp + esm → MLP."""
+    def __init__(self, emb_dim=128, dropout=0.2):
+        super().__init__()
+        self.struct_interaction = BiDirectionalInteraction(emb_dim)
         self.fp_proj = nn.Sequential(
-            nn.Linear(fp_dim, 512), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(512, emb_dim),
-        )
-        self.esm_proj = nn.Sequential(
-            nn.Linear(esm_dim, 256), nn.ReLU(), nn.Dropout(dropout),
-            nn.Linear(256, emb_dim),
-        )
-        self.atom2prot = nn.Linear(emb_dim, emb_dim)
-        self.motif2prot = nn.Linear(emb_dim, emb_dim)
-        self.score_fusion = nn.Conv1d(2, 1, kernel_size=1)
-        self.mlp = MLPDecoder(emb_dim * 3, 1024, 256, 1, dropout=dropout)
+            nn.Linear(1024, 256), nn.ReLU(), nn.Dropout(dropout), nn.Linear(256, emb_dim))
+        self.esm_global_proj = nn.Sequential(
+            nn.Linear(480, 256), nn.ReLU(), nn.Dropout(dropout), nn.Linear(256, emb_dim))
+        self.mlp = MLPDecoder(emb_dim * 4, 1024, 256, 1, dropout=dropout)
 
-    def _attention(self, layer, query, key, key_mask):
-        q = torch.relu(layer(query))
-        k = torch.relu(layer(key))
-        scores = torch.bmm(q, k.transpose(1, 2)) / (q.size(-1) ** 0.5)
-        if key_mask is not None:
-            scores = scores.masked_fill(~key_mask.unsqueeze(1), -1e9)
-        return scores
-
-    def forward(self, atom_feat, atom_batch, motif_feat, motif_batch,
-                prot_feat, prot_batch, fingerprint, esm_global):
+    def forward(self, atom_feat, atom_batch, egnn_prot, egnn_batch,
+                fingerprint, esm_global):
         atom_d, a_mask = to_dense_batch(atom_feat, atom_batch)
-        motif_d, m_mask = to_dense_batch(motif_feat, motif_batch)
-        prot_d, p_mask = to_dense_batch(prot_feat, prot_batch)
+        egnn_d, egnn_mask = to_dense_batch(egnn_prot, egnn_batch)
 
-        a_scores = self._attention(self.atom2prot, atom_d, prot_d, p_mask)
-        m_scores = self._attention(self.motif2prot, motif_d, prot_d, p_mask)
-
-        a_pool = (a_scores * a_mask.unsqueeze(-1)).sum(dim=1) \
-                 / a_mask.sum(dim=1).clamp_min(1).unsqueeze(-1)
-        m_pool = (m_scores * m_mask.unsqueeze(-1)).sum(dim=1) \
-                 / m_mask.sum(dim=1).clamp_min(1).unsqueeze(-1)
-
-        # Per-residue fusion: stack [atom, motif] scores → 1×1 conv → 1 channel
-        combined = torch.stack([a_pool, m_pool], dim=1)     # [B, 2, Np]
-        combined = self.score_fusion(combined).squeeze(1)   # [B, Np]
-        attn = F.softmax(combined, dim=-1)
-
-        weighted_prot = torch.bmm(attn.unsqueeze(1), prot_d).squeeze(1)
-        interaction = weighted_prot + global_max_pool(prot_feat, prot_batch)
+        d_struct, p_struct = self.struct_interaction(atom_d, a_mask, egnn_d, egnn_mask)
 
         return self.mlp(torch.cat([
-            interaction,
-            self.fp_proj(fingerprint),
-            self.esm_proj(esm_global),
+            d_struct, p_struct,
+            self.fp_proj(fingerprint), self.esm_global_proj(esm_global),
         ], dim=-1))
 
 
 class DTAModel(nn.Module):
-    """DTA model: atom GNN + motif GNN + protein EGNN → learnable fusion."""
+    """DTA model: atom GNN + ChemBERTa + protein EGNN → 2-way vote fusion."""
 
     def __init__(
         self,
@@ -150,19 +151,19 @@ class DTAModel(nn.Module):
         dropout: float = 0.2,
         atom_in_dim: int = 37,
         motif_in_dim: int = 50,
-        pocket_feat_dim: int = 41,
+        pocket_feat_dim: int = 608,
         pocket_num_layers: int = 2,
+        atom_num_layers: int = 2,
+        phys_feat_dim: int = 41,
+        esm_res_dim: int = 480,
+        motif_num_layers: int = 2,
     ):
         super().__init__()
         self.task = task
         self.drug_encoder = AtomGNN(
             in_dim=atom_in_dim, edge_dim=13,
+            num_layers=atom_num_layers,
             node_key="atom", edge_key=("atom", "bond", "atom"),
-            dropout=dropout,
-        )
-        self.motif_encoder = AtomGNN(
-            in_dim=motif_in_dim, edge_dim=37,
-            node_key="motif", edge_key=("motif", "connects", "motif"),
             dropout=dropout,
         )
         self.pocket_encoder = PocketGraphEncoder(
@@ -178,9 +179,8 @@ class DTAModel(nn.Module):
 
     def forward(self, data: DTABatch) -> Tensor:
         atom_nodes, atom_batch = self.drug_encoder(data.hetero)
-        motif_nodes, motif_batch = self.motif_encoder(data.hetero)
-        prot_nodes, prot_batch = self.pocket_encoder(
-            data.pocket_graph.x[:, 41:], # Exclude one-hot amino acid type 
+        egnn_prot, egnn_batch = self.pocket_encoder(    
+            data.pocket_graph.x[:, 41:],
             data.pocket_graph.edge_index,
             data.pocket_graph.edge_attr,
             data.pocket_graph.coords,
@@ -188,8 +188,7 @@ class DTAModel(nn.Module):
         )
         return self.fusion_head(
             atom_feat=atom_nodes, atom_batch=atom_batch,
-            motif_feat=motif_nodes, motif_batch=motif_batch,
-            prot_feat=prot_nodes, prot_batch=prot_batch,
+            egnn_prot=egnn_prot, egnn_batch=egnn_batch,
             fingerprint=data.fingerprint,
             esm_global=data.esm_global,
         )
@@ -198,7 +197,7 @@ class DTAModel(nn.Module):
         def count(module):
             return sum(parameter.numel() for parameter in module.parameters() if parameter.requires_grad)
         print(self.drug_encoder)
-        print(self.motif_encoder)
+        # print(self.motif_encoder)
         print(self.pocket_encoder)
         print(self.fusion_head)
                 
