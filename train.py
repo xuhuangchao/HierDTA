@@ -53,11 +53,13 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.2, help='Dropout')
 
     parser.add_argument('--atom_in_dim', type=int, default=37, help='Atom feature dimension')
+    parser.add_argument('--atom_edge_dim', type=int, default=13, help='Atom edge feature dimension')
     parser.add_argument('--motif_in_dim', type=int, default=50, help='Motif feature dimension')
-    parser.add_argument('--pocket_feat_dim', type=int, default=608, help='Pocket residue node feature dimension')
-    parser.add_argument('--pocket_num_layers', type=int, default=2, help='Pocket GNN layers')
-    parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom GNN layers')
-    parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif GNN layers')
+    parser.add_argument('--motif_edge_dim', type=int, default=37, help='Motif edge feature dimension')
+    parser.add_argument('--pocket_in_dim', type=int, default=608, help='Pocket residue node feature dimension')
+    parser.add_argument('--pocket_num_layers', type=int, default=2, help='Pocket GAT layers')
+    parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom GAT layers')
+    parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif GAT layers')
     parser.add_argument('--run_name', type=str, default='inter', help='Output filename suffix')
 
     return parser.parse_args()
@@ -115,8 +117,10 @@ def build_model(args):
         task='regression',
         dropout=args.dropout,
         atom_in_dim=args.atom_in_dim,
+        atom_edge_dim=args.atom_edge_dim,
         motif_in_dim=args.motif_in_dim,
-        pocket_feat_dim=args.pocket_feat_dim,
+        motif_edge_dim=args.motif_edge_dim,
+        pocket_in_dim=args.pocket_in_dim,
         pocket_num_layers=args.pocket_num_layers,
         atom_num_layers=args.atom_num_layers,
         motif_num_layers=args.motif_num_layers,

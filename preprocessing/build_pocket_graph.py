@@ -7,11 +7,11 @@ Requires: pip install fair-esm
 
 Output: data/cache/{dataset}_pocket_graphs.pt
   Per target key:
-    node_features:  [N_res, 649]  (physical 41 + ESM2 480 + surface 128)
-    residue_coords: [N_res, 3]    (Cα coordinates for EGNN)
-    edge_index:     [2, E]
-    edge_weight:    [E, 2]        (min_dist, max_dist)
-    esm_global:     [480]         (full-sequence ESM-2 mean pool)
+    node_features:   [N_res, 649]  (physical 41 + ESM2 480 + surface 128)
+    residue_coords:  [N_res, 3]    (Cα coordinates for EGNN)
+    edge_index:      [2, E]
+    edge_weight:     [E, 2]        (min_dist, max_dist)
+    esm_global:      [480]         (full-sequence ESM-2 mean pool)
 """
 
 import argparse
@@ -39,7 +39,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 # ──────────────────────────────────────────────────────────
 #  Physical feature computation (41-dim per residue)
-#  Adapted from backup_code/protein_process.py
 # ──────────────────────────────────────────────────────────
 
 METAL = [
@@ -55,7 +54,7 @@ RESIDUE_TYPES = [
     'SER', 'THR', 'CYS', 'MET', 'ASN', 'GLN', 'ASP', 'GLU', 'LYS',
     'ARG', 'HIS', 'MSE', 'CSO', 'PTR', 'TPO', 'KCX', 'CSD', 'SEP',
     'MLY', 'PCA', 'LLP', 'M', 'X',
-]  # 32 types
+]
 
 AA3_TO_1 = {
     "ALA": "A", "ARG": "R", "ASN": "N", "ASP": "D", "CYS": "C",
@@ -68,14 +67,12 @@ AA3_TO_1 = {
 
 
 def one_of_k_encoding_unk(x, allowable_set):
-    """Maps inputs not in allowable_set to the last element."""
     if x not in allowable_set:
         x = allowable_set[-1]
     return [x == s for s in allowable_set]
 
 
 def obtain_resname(resname_str):
-    """Normalize residue name."""
     if resname_str[:2] == "CA":
         return "CA"
     elif resname_str[:2] == "FE":
@@ -88,49 +85,37 @@ def obtain_resname(resname_str):
 
 
 def residue_to_aa(residue):
-    """Convert a PDB residue name to an ESM-compatible one-letter code."""
     return AA3_TO_1.get(obtain_resname(residue.get_resname()), "X")
 
 
 def calc_self_dist(residue):
-    """Compute intra-residue atom distances (5-dim)."""
     try:
         atoms = list(residue.get_atoms())
         coords = np.array([a.get_coord() for a in atoms])
         if len(coords) < 2:
             return [0.0, 0.0, 0.0, 0.0, 0.0]
-
-        # Pairwise distances
         from scipy.spatial.distance import pdist
         dists = pdist(coords)
         max_d = dists.max() if len(dists) > 0 else 0.0
         min_d = dists.min() if len(dists) > 0 else 0.0
-
-        # Backbone distances
         ca = [a for a in atoms if a.get_name() == "CA"]
         c  = [a for a in atoms if a.get_name() == "C"]
         n  = [a for a in atoms if a.get_name() == "N"]
         o  = [a for a in atoms if a.get_name() == "O"]
-
         def d(a_list, b_list):
             if a_list and b_list:
                 return np.linalg.norm(a_list[0].get_coord() - b_list[0].get_coord())
             return 0.0
-
         return [max_d * 0.1, min_d * 0.1, d(ca, o) * 0.1, d(o, n) * 0.1, d(n, c) * 0.1]
     except Exception:
         return [0.0, 0.0, 0.0, 0.0, 0.0]
 
 
 def calc_dihedral_angles(residue, prev_residue, next_residue):
-    """Compute phi, psi, omega, chi1 dihedral angles (4-dim)."""
     try:
-        # Vector shortcuts for backbone atoms
         def v(res, name):
             atoms = [a for a in res.get_atoms() if a.get_name() == name]
             return atoms[0].get_vector() if atoms else None
-
-        # Phi: C(i-1) - N(i) - CA(i) - C(i)
         phi = 0.0
         if prev_residue:
             c_prev = v(prev_residue, "C")
@@ -139,8 +124,6 @@ def calc_dihedral_angles(residue, prev_residue, next_residue):
             c_curr = v(residue, "C")
             if all([c_prev, n_curr, ca_curr, c_curr]):
                 phi = calc_dihedral(c_prev, n_curr, ca_curr, c_curr) * 0.01
-
-        # Psi: N(i) - CA(i) - C(i) - N(i+1)
         psi = 0.0
         if next_residue:
             n_curr = v(residue, "N")
@@ -149,32 +132,23 @@ def calc_dihedral_angles(residue, prev_residue, next_residue):
             n_next = v(next_residue, "N")
             if all([n_curr, ca_curr, c_curr, n_next]):
                 psi = calc_dihedral(n_curr, ca_curr, c_curr, n_next) * 0.01
-
-        omega = 0.0  # omega rarely useful for non-contiguous pocket
-        chi1 = 0.0   # chi1 requires side-chain atoms
-
-        return [phi, psi, omega, chi1]
+        return [phi, psi, 0.0, 0.0]
     except Exception:
         return [0.0, 0.0, 0.0, 0.0]
 
 
 def calc_res_features(residue, all_residues_dict, all_residues_keys):
-    """Compute 41-dim physical features for a single residue."""
     resname = obtain_resname(residue.get_resname())
-    ohe = one_of_k_encoding_unk(resname, RESIDUE_TYPES)           # 32
-    sd = calc_self_dist(residue)                                    # 5
-
+    ohe = one_of_k_encoding_unk(resname, RESIDUE_TYPES)
+    sd = calc_self_dist(residue)
     current_idx = next(
-        (idx for idx, rid in enumerate(all_residues_keys) if all_residues_dict[rid] is residue),
-        -1,
-    )
+        (idx for idx, rid in enumerate(all_residues_keys) if all_residues_dict[rid] is residue), -1)
     prev_idx = current_idx - 1
     next_idx = current_idx + 1
     prev_res = all_residues_dict[all_residues_keys[prev_idx]] if current_idx >= 0 and prev_idx >= 0 else None
     next_res = all_residues_dict[all_residues_keys[next_idx]] if 0 <= next_idx < len(all_residues_keys) else None
-    da = calc_dihedral_angles(residue, prev_res, next_res)       # 4
-
-    return np.array(ohe + sd + da, dtype=np.float32)  # 41-dim
+    da = calc_dihedral_angles(residue, prev_res, next_res)
+    return np.array(ohe + sd + da, dtype=np.float32)
 
 
 # ──────────────────────────────────────────────────────────
@@ -182,31 +156,24 @@ def calc_res_features(residue, all_residues_dict, all_residues_keys):
 # ──────────────────────────────────────────────────────────
 
 def build_edges(all_residues_dict, cutoff=10.0):
-    """Build residue-level edges based on minimum atom-atom distance."""
     residues = list(all_residues_dict.values())
     n = len(residues)
     edge_src, edge_dst, edge_min, edge_max = [], [], [], []
-
     for i in range(n):
         for j in range(i + 1, n):
             coords_i = np.array([a.get_coord() for a in residues[i].get_atoms()])
             coords_j = np.array([a.get_coord() for a in residues[j].get_atoms()])
-
-            # Min atom-atom distance
             from scipy.spatial.distance import cdist
             dists = cdist(coords_i, coords_j)
             min_d = dists.min()
-
             if min_d <= cutoff:
                 edge_src.extend([i, j])
                 edge_dst.extend([j, i])
                 edge_min.extend([min_d * 0.1, min_d * 0.1])
                 edge_max.extend([dists.max() * 0.1, dists.max() * 0.1])
-
     if not edge_src:
         return (torch.zeros(2, 0, dtype=torch.long),
                 torch.zeros(0, 2, dtype=torch.float32))
-
     return (torch.tensor([edge_src, edge_dst], dtype=torch.long),
             torch.tensor(list(zip(edge_min, edge_max)), dtype=torch.float32))
 
@@ -216,45 +183,33 @@ def build_edges(all_residues_dict, cutoff=10.0):
 # ──────────────────────────────────────────────────────────
 
 def match_surface_to_residues(residue_coords, surface_xyz, surface_emb, k=5):
-    """For each residue, find K nearest surface points and average their embeddings.
-
-    Args:
-        residue_coords: list of (x,y,z) tuples, one per residue (CA atom)
-        surface_xyz: np.array [N_surf, 3]
-        surface_emb: torch.Tensor [N_surf, 128]
-        k: number of nearest surface points
-
-    Returns:
-        torch.Tensor [N_res, 128]
-    """
     from scipy.spatial.distance import cdist
     ca_coords = np.array(residue_coords)
-    dists = cdist(ca_coords, surface_xyz)                                # [N_res, N_surf]
-    nearest_idx = np.argpartition(dists, k, axis=1)[:, :k]               # [N_res, k]
-
+    dists = cdist(ca_coords, surface_xyz)
+    nearest_idx = np.argpartition(dists, k, axis=1)[:, :k]
     surface_feats = []
     for res_i in range(len(residue_coords)):
         nearest_embs = surface_emb[nearest_idx[res_i]]
         surface_feats.append(nearest_embs.mean(dim=0))
+    return torch.stack(surface_feats)
 
-    return torch.stack(surface_feats)  # [N_res, 128]
+
+# ──────────────────────────────────────────────────────────
+#  Pocket file lookup
+# ──────────────────────────────────────────────────────────
+
+def get_pocket_file(pocket_dir, key, suffix=".pdb"):
+    processed_key = re.sub(r'[.\-() ]', '', key.lower())
+    all_files = glob.glob(os.path.join(pocket_dir, f"{processed_key}*{suffix}"))
+    return all_files[0] if all_files else None
 
 
 # ──────────────────────────────────────────────────────────
 #  Main pipeline
 # ──────────────────────────────────────────────────────────
 
-def get_pocket_file(pocket_dir, key, suffix=".pdb"):
-    """Find pocket PDB file for a target key."""
-    processed_key = re.sub(r'[.\-() ]', '', key.lower())
-    all_files = glob.glob(os.path.join(pocket_dir, f"{processed_key}*{suffix}"))
-    return all_files[0] if all_files else None
-
-
 def build_pocket_graphs(dataset_name, data_root=PROJECT_ROOT / "data",
                         cache_dir=None, max_seq_len=1200):
-    """Main entry point for pocket graph preprocessing."""
-
     data_root = Path(data_root)
     dataset_dir = data_root / dataset_name
     pocket_dir = dataset_dir / f"pocket1_{dataset_name}"
@@ -266,17 +221,14 @@ def build_pocket_graphs(dataset_name, data_root=PROJECT_ROOT / "data",
         cache_dir = Path(cache_dir)
     os.makedirs(cache_dir, exist_ok=True)
 
-    # --- Load protein sequences ---
     prot_csv = dataset_dir / f"{dataset_name}_prots.csv"
     if not prot_csv.exists():
         raise FileNotFoundError(f"Protein CSV not found: {prot_csv}")
     prot_df = pd.read_csv(prot_csv)
     prot_dict = dict(zip(prot_df["target_key"], prot_df["target_sequence"]))
-
     all_keys = list(prot_dict.keys())
     print(f"Dataset: {dataset_name}, proteins: {len(all_keys)}")
 
-    # --- Load ESM-2 (480-dim, 35M params) ---
     print("Loading ESM-2 (esm2_t12_35M_UR50D)...")
     model, alphabet = esm.pretrained.load_model_and_alphabet("esm2_t12_35M_UR50D")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -284,26 +236,23 @@ def build_pocket_graphs(dataset_name, data_root=PROJECT_ROOT / "data",
     batch_converter = alphabet.get_batch_converter()
     print("ESM-2 model loaded successfully")
 
-    # --- Process each target ---
     pocket_graphs = {}
     parser = PDBParser(QUIET=True)
 
     for key in tqdm(all_keys, desc="Building pocket graphs"):
         try:
-            # Step 1: Find pocket PDB
             pocket_file = get_pocket_file(str(pocket_dir), key)
             if not pocket_file:
                 print(f"  WARNING: No pocket PDB for {key}")
                 continue
 
-            # Step 2: Parse PDB → extract residues
             structure = parser.get_structure(key, pocket_file)
             all_residues_dict = {}
             all_residues_keys = []
             for pdb_model in structure:
                 for chain in pdb_model:
                     for res in chain:
-                        if res.get_id()[0] == " ":  # standard residue
+                        if res.get_id()[0] == " ":
                             res_id = res.get_id()[1]
                             if res_id not in all_residues_keys:
                                 all_residues_keys.append(res_id)
@@ -318,53 +267,42 @@ def build_pocket_graphs(dataset_name, data_root=PROJECT_ROOT / "data",
                 all_residues_keys = all_residues_keys[:max_seq_len]
                 all_residues_dict = {rid: all_residues_dict[rid] for rid in all_residues_keys}
 
-            # Step 3: Compute physical features (41-dim)
+            # Physical features (41-dim)
             phys_feats = np.array([
                 calc_res_features(all_residues_dict[rid], all_residues_dict, all_residues_keys)
                 for rid in all_residues_keys
-            ], dtype=np.float32)  # [N_res, 41]
+            ], dtype=np.float32)
 
-            # Step 4: Run ESM-2 on full protein sequence for global protein feature.
+            # Full-sequence ESM-2 → esm_global (480-dim)
             full_seq = prot_dict.get(key, "")
             if not full_seq:
                 print(f"  WARNING: No sequence for {key}")
                 continue
-
             truncated_seq = full_seq[:max_seq_len]
             batch_labels, batch_strs, batch_tokens = batch_converter([(key, truncated_seq)])
             batch_tokens = batch_tokens.to(device)
-
             with torch.no_grad():
                 full_results = model(batch_tokens, repr_layers=[12])
+            esm_full = full_results["representations"][12][0, 1:len(truncated_seq)+1].cpu()
+            esm_global = esm_full.mean(dim=0)
 
-            # Full-sequence per-residue embeddings [L, 480] (exclude CLS/EOS)
-            esm_full = full_results["representations"][12][0, 1:len(truncated_seq)+1].cpu()  # [L, 480]
-
-            # Global: mean pool
-            esm_global = esm_full.mean(dim=0)  # [480]
-
-            # Node ESM features use pocket PDB residue order directly. This avoids
-            # fragile PDB residue-number to FASTA-position mapping.
+            # Pocket sequence → ESM-2 per-residue (480-dim)
             pocket_seq = "".join(residue_to_aa(all_residues_dict[rid]) for rid in all_residues_keys)
             if not pocket_seq:
                 print(f"  WARNING: Empty pocket sequence for {key}")
                 continue
-
             _, _, pocket_tokens = batch_converter([(key, pocket_seq)])
             pocket_tokens = pocket_tokens.to(device)
-
             with torch.no_grad():
                 pocket_results = model(pocket_tokens, repr_layers=[12])
-
-            pocket_esm = pocket_results["representations"][12][0, 1:len(pocket_seq)+1].cpu()  # [N_res, 480]
+            pocket_esm = pocket_results["representations"][12][0, 1:len(pocket_seq)+1].cpu()
             valid_res_ids = all_residues_keys
             valid_res_dict = all_residues_dict
 
-            # Step 5: Surface point matching & extract Cα coordinates
+            # Surface point matching & Cα coordinates
             surface_file = surface_dir / f"{key}.pt"
             surface_feat = torch.zeros(len(valid_res_ids), 128)
 
-            # Extract Cα coordinates once (used by both surface matching and EGNN)
             ca_coords = []
             for rid in valid_res_ids:
                 res = all_residues_dict[rid]
@@ -373,30 +311,33 @@ def build_pocket_graphs(dataset_name, data_root=PROJECT_ROOT / "data",
                     ca_coords.append(ca_atoms[0].get_coord().tolist())
                 else:
                     ca_coords.append([0.0, 0.0, 0.0])
-            residue_coords = torch.tensor(ca_coords, dtype=torch.float32)  # [N_res, 3]
+            residue_coords = torch.tensor(ca_coords, dtype=torch.float32)
 
             if surface_file.exists():
                 surf_data = torch.load(surface_file, map_location="cpu", weights_only=True)
                 surface_xyz = surf_data["xyz"].numpy()
                 surface_emb = surf_data["embedding"]
-
-                # Surface matching needs tuple coords
                 ca_tuples = [tuple(c) for c in ca_coords]
                 surface_feat = match_surface_to_residues(ca_tuples, surface_xyz, surface_emb, k=5)
             else:
                 print(f"  WARNING: No surface file for {key}, surface features set to 0")
 
-            # Step 6: Concatenate all features → [N_res, 649]
+            # Node features = phys(41) + ESM2(480) + surface(128) = 649
             node_features = torch.cat([
-                torch.from_numpy(phys_feats),    # [N_res, 41]
-                pocket_esm,                       # [N_res, 480]
-                surface_feat,                     # [N_res, 128]
+                torch.from_numpy(phys_feats),
+                pocket_esm,
+                surface_feat,
             ], dim=-1)
 
-            # Step 7: Build residue graph edges
             edge_index, edge_weight = build_edges(valid_res_dict)
 
-            # Step 8: Store
+            # Padded full-sequence ESM2
+            L = esm_full.size(0)
+            esm_full_padded = torch.zeros(max_seq_len, 480, dtype=torch.float32)
+            esm_full_padded[:L] = esm_full
+            esm_full_mask = torch.zeros(max_seq_len, dtype=torch.bool)
+            esm_full_mask[:L] = True
+
             print(f"  {key}: node_features={list(node_features.shape)}, "
                   f"residue_coords={list(residue_coords.shape)}, "
                   f"edge_index={list(edge_index.shape)}")
@@ -406,9 +347,11 @@ def build_pocket_graphs(dataset_name, data_root=PROJECT_ROOT / "data",
                 "edge_index": edge_index,
                 "edge_weight": edge_weight,
                 "esm_global": esm_global,
+                "esm_full": esm_full_padded,
+                "esm_full_mask": esm_full_mask,
+                "seq_len": len(truncated_seq),
             }
 
-            # Cleanup
             del full_results, pocket_results, batch_tokens, pocket_tokens
             if device.type == "cuda":
                 torch.cuda.empty_cache()
@@ -418,7 +361,6 @@ def build_pocket_graphs(dataset_name, data_root=PROJECT_ROOT / "data",
             traceback.print_exc()
             continue
 
-    # --- Save cache ---
     cache_path = cache_dir / f"{dataset_name}_pocket_graphs.pt"
     torch.save(pocket_graphs, cache_path)
     print(f"\nSaved {len(pocket_graphs)} pocket graphs to {cache_path}")

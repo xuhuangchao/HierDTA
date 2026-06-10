@@ -12,12 +12,16 @@ from transformers import AutoModel, AutoTokenizer
 print("Transformers version:", transformers.__version__)
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / "data"
-MODEL_PATH = PROJECT_ROOT / "esm2_pt" / "ESMC-600M"
+MODEL_PATH = PROJECT_ROOT / "esm_pt" / "ESMC-600M"
 
-# Load model
-model = AutoModel.from_pretrained(MODEL_PATH).eval()
+# Load model (use relative path + offline env to bypass huggingface_hub issues)
+import os as _os
+_os.environ["TRANSFORMERS_OFFLINE"] = "1"
+_os.environ["HF_HUB_OFFLINE"] = "1"
+_model_dir = _os.path.relpath(str(MODEL_PATH.resolve()), _os.getcwd())
+model = AutoModel.from_pretrained(_model_dir, local_files_only=True).eval()
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+tokenizer = AutoTokenizer.from_pretrained(_model_dir, local_files_only=True)
 
 MAX_SEQ_LENGTH = 1200
 

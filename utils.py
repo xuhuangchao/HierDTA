@@ -90,8 +90,6 @@ class TestbedDatasetHMol(Dataset):
                 pocket_graph=pocket_graph,
                 fingerprint=torch.as_tensor(drug_data['fingerprint'], dtype=torch.float32).unsqueeze(0),
                 esm_global=torch.as_tensor(pocket_data['esm_global'], dtype=torch.float32).unsqueeze(0),
-                chemberta_tokens=torch.as_tensor(drug_data['chemberta_tokens'], dtype=torch.float32),
-                chemberta_mask=torch.as_tensor(drug_data['chemberta_mask'], dtype=torch.bool),
                 smiles=smiles,
                 key=key,
                 y=torch.FloatTensor([labels]),

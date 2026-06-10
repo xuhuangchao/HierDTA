@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 from rdkit import Chem
-from rdkit.Chem import rdFingerprintGenerator
+from rdkit.Chem import rdFingerprintGenerator, MACCSkeys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -18,11 +18,26 @@ from preprocessing.chemutils import build_himgnn_mol_hetero_dict
 
 
 ECFP_DIM = 1024
+MACCS_DIM = 166
+TOPO_DIM = 2048
+
+FINGERPRINT_DIM = ECFP_DIM + MACCS_DIM + TOPO_DIM  # 3238
 
 
 def build_mol_hetero_dict(smiles):
     """Build a cache-friendly heterogeneous molecular graph."""
     return build_himgnn_mol_hetero_dict(smiles)
+
+
+def build_fingerprint(mol):
+    """Build concatenated fingerprint: ECFP4 + MACCS + Topological."""
+    ecfp_gen = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=ECFP_DIM)
+    topo_gen = rdFingerprintGenerator.GetRDKitFPGenerator(fpSize=TOPO_DIM)
+    return np.concatenate([
+        ecfp_gen.GetFingerprintAsNumPy(mol),      # 1024
+        np.array(MACCSkeys.GenMACCSKeys(mol), dtype=np.float32),  # 166
+        topo_gen.GetFingerprintAsNumPy(mol),      # 2048
+    ])  # → 3238
 
 
 def main():
@@ -54,8 +69,7 @@ def main():
 
     print(f"Dataset: {dataset}")
     print(f"Cache directory: {cache_dir}")
-
-    mg = rdFingerprintGenerator.GetMorganGenerator(radius=2, fpSize=ECFP_DIM)
+    print(f"Fingerprint dim: {FINGERPRINT_DIM} (ECFP{ECFP_DIM} + MACCS{MACCS_DIM} + Topo{TOPO_DIM})")
 
     # ── First pass: collect ChemBERTa tokens to determine padding length ──
     print("Collecting ChemBERTa token lengths...")
@@ -71,7 +85,7 @@ def main():
     max_tokens = max(token_lens) if token_lens else 1
     print(f"  Found {len(token_dict)}/{len(set(drugs_df['compound_iso_smiles']))} drugs with ChemBERTa tokens")
     print(f"  Token lengths — min: {min(token_lens)}, max: {max_tokens}, mean: {np.mean(token_lens):.1f}")
-    print(f"  Feature dim: {next(iter(token_dict.values())).shape[1]}")
+    print(f"  Feature dim: {next(iter(token_dict.values())).shape[1]}" if token_dict else "  No ChemBERTa tokens found")
 
     # ── Second pass：build drug cache with padded ChemBERTa ──
     drug_features = {}
@@ -82,6 +96,9 @@ def main():
         graph = build_mol_hetero_dict(smiles)
         if graph is None:
             raise ValueError(f"Cannot build heterogeneous graph for SMILES: {smiles}")
+
+        # Combined fingerprint: ECFP + MACCS + Topological
+        fp_combined = build_fingerprint(mol)
 
         # ChemBERTa token features — padded to fixed length
         if smiles in token_dict:
@@ -96,7 +113,7 @@ def main():
             mask = np.zeros(max_tokens, dtype=np.bool_)
 
         drug_features[smiles] = {
-            "fingerprint": mg.GetFingerprintAsNumPy(mol),
+            "fingerprint": fp_combined,
             "hetero_graph": graph,
             "chemberta_tokens": padded,    # [max_tokens, 384]
             "chemberta_mask": mask,         # [max_tokens]
@@ -104,6 +121,7 @@ def main():
 
     torch.save(drug_features, cache_dir / f"{dataset}_drug_features.pt")
     print(f"  Unique drugs: {len(drug_features)}")
+    print(f"  Fingerprint dim: {FINGERPRINT_DIM}")
     print(f"  chemberta_tokens shape: [max_tokens={max_tokens}, 384]")
     print("Drug cache building complete.")
 

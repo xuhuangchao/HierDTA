@@ -1,70 +1,66 @@
-"""Drug, residue-graph, and protein-surface encoders for DTAModel."""
+"""Drug and pocket-residue encoders for DTAModel."""
 
-import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
-from torch_geometric.data import HeteroData
-from torch_geometric.nn import GATv2Conv, global_mean_pool
-from torch_geometric.utils import scatter
+from torch_geometric.nn import GATv2Conv
 
 from .egnn_clean import EGNN
 
 
-# ── 1. 分子 GNN (通用: atom / motif) ──
 class AtomGNN(nn.Module):
-    """Molecular graph encoder — works for both atom-bond and motif-connect graphs.
+    """Reusable homogeneous branch over one node/edge type in a HeteroData."""
 
-    node_key / edge_key determine which HeteroData fields are consumed,
-    making the same class reusable for atom-level and motif-level encoding.
-    """
-    def __init__(self, in_dim=37, hidden_dim=128, edge_dim=13, num_layers=2, dropout=0.2,
-                 node_key="atom", edge_key=("atom", "bond", "atom")):
+    def __init__(
+        self,
+        in_dim=37,
+        hidden_dim=128,
+        edge_dim=13,
+        num_layers=2,
+        dropout=0.2,
+        node_key="atom",
+        edge_key=("atom", "bond", "atom"),
+    ):
         super().__init__()
         self.node_key = node_key
         self.edge_key = edge_key
-        self.convs = nn.ModuleList([
-            GATv2Conv(in_dim if i == 0 else hidden_dim, hidden_dim,
-                      edge_dim=edge_dim, dropout=dropout)
-            for i in range(num_layers)
-        ])
+        self.convs = nn.ModuleList(
+            [
+                GATv2Conv(
+                    in_dim if i == 0 else hidden_dim,
+                    hidden_dim,
+                    edge_dim=edge_dim,
+                    dropout=dropout,
+                )
+                for i in range(num_layers)
+            ]
+        )
 
     def forward(self, data):
         x = data[self.node_key].x
-        ei = data[self.edge_key].edge_index
-        ea = data[self.edge_key].edge_attr
-
+        edge_index = data[self.edge_key].edge_index
+        edge_attr = data[self.edge_key].edge_attr
         for conv in self.convs:
-            x = F.relu(conv(x, ei, edge_attr=ea))
+            x = F.elu(conv(x, edge_index, edge_attr=edge_attr))
 
         return x, data[self.node_key].batch
 
 
-# ── 2. 口袋残基编码器 (EGNN) ──
 class PocketGraphEncoder(nn.Module):
-    """Pocket residue encoder with E(n) Equivariant GNN.
+    """Pocket residue encoder with E(n) equivariant message passing."""
 
-    EGNN updates both residue features and Cα coordinates through
-    message passing.  The coordinate-update mechanism preserves 3D
-    spatial structure; edges are distance-filtered (5A cutoff from
-    data pipeline) to keep computation tractable.
-    """
-    def __init__(self, pocket_in_dim=649, hidden_dim=128, num_layers=2, dropout=0.2):
+    def __init__(self, pocket_in_dim=608, hidden_dim=128, num_layers=2, dropout=0.2):
         super().__init__()
         self.egnn = EGNN(
             in_node_nf=pocket_in_dim,
             hidden_nf=hidden_dim,
             out_node_nf=hidden_dim,
-            in_edge_nf=2,           # [min_dist*0.1, max_dist*0.1]
+            in_edge_nf=2,
             n_layers=num_layers,
             residual=True,
             normalize=True,
             tanh=False,
         )
-        # self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, edge_index, edge_attr, coords, batch):
-        # x = self.dropout(x)
         h, _ = self.egnn(x, coords, edge_index, edge_attr=edge_attr)
         return h, batch
-    
