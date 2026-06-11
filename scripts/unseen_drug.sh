@@ -1,5 +1,4 @@
 #!/bin/bash
-
 for seed in 41 42 43 32 33
 do
   python train.py \
@@ -7,7 +6,6 @@ do
     --gpu_idx 1 \
     --strategy unseen_drug \
     --seed "${seed}" \
-    --run_name 0608_10A_egnn608_both \
+    --run_name avg_am2pocket_sharedq \
     "$@"
 done
-

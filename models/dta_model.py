@@ -77,29 +77,29 @@ class MLPDecoder(nn.Module):
 
 
 class Interaction(nn.Module):
-    """Single-direction hierarchical cross-attention.
+    """Atom/motif-to-pocket attention with averaged pocket weights."""
 
-    Atom nodes and motif nodes independently query protein residue nodes.
-    Protein residues act as memory and are not used as queries.
-    """
-
-    def __init__(self, emb_dim: int = 128, num_heads: int = 4, dropout: float = 0.2):
+    def __init__(self, emb_dim: int = 128):
         super().__init__()
-        if emb_dim % num_heads != 0:
-            raise ValueError("emb_dim must be divisible by num_heads")
+        self.scale = emb_dim ** -0.5
+        self.query_proj = nn.Linear(emb_dim, emb_dim)
+        self.pocket_proj = nn.Linear(emb_dim, emb_dim)
 
-        self.atom_to_prot = nn.MultiheadAttention(
-            emb_dim, num_heads, dropout=dropout, batch_first=True
-        )
-        self.motif_to_prot = nn.MultiheadAttention(
-            emb_dim, num_heads, dropout=dropout, batch_first=True
-        )
-        self.atom_norm = nn.LayerNorm(emb_dim)
-        self.motif_norm = nn.LayerNorm(emb_dim)
-
-    @staticmethod
-    def masked_mean(x: Tensor, mask: Tensor) -> Tensor:
-        return (x * mask.unsqueeze(-1)).sum(1) / mask.sum(1).clamp_min(1).unsqueeze(-1)
+    def pocket_weights(
+        self,
+        query_feat: Tensor,
+        query_mask: Tensor,
+        pocket_key: Tensor,
+        prot_mask: Tensor,
+    ) -> Tensor:
+        # query_feat: [B, Nq, D], pocket_key: [B, Np, D] -> attn: [B, Nq, Np]
+        attn = torch.bmm(query_feat, pocket_key.transpose(1, 2)) * self.scale
+        # prot_mask: [B, Np], invalid padded pocket nodes are excluded before softmax.
+        attn = attn.masked_fill(~prot_mask.unsqueeze(1), -1e9)
+        # Per atom/motif distribution over pocket nodes: [B, Nq, Np].
+        attn = F.softmax(attn, dim=2) * query_mask.unsqueeze(-1)
+        # Average valid atom/motif query distributions into one pocket weight: [B, Np].
+        return attn.sum(1) / query_mask.sum(1).clamp_min(1).unsqueeze(-1)
 
     def forward(
         self,
@@ -109,31 +109,24 @@ class Interaction(nn.Module):
         motif_mask: Tensor,
         prot_feat: Tensor,
         prot_mask: Tensor,
-    ) -> tuple[Tensor, Tensor]:
-        prot_key_padding = ~prot_mask
+    ) -> Tensor:
+        # atom_feat: [B, Na, D], motif_feat: [B, Nm, D], prot_feat: [B, Np, D].
+        pocket_key = self.pocket_proj(prot_feat)
 
-        atom_attn, _ = self.atom_to_prot(
-            query=atom_feat,
-            key=prot_feat,
-            value=prot_feat,
-            key_padding_mask=prot_key_padding,
-            need_weights=False,
+        # atom2pocket and motif2pocket share the drug-side query projection: [B, Np].
+        atom2pocket = self.pocket_weights(
+            self.query_proj(atom_feat), atom_mask, pocket_key, prot_mask
         )
-        atom_ctx = self.atom_norm(atom_feat + atom_attn)
+        motif2pocket = self.pocket_weights(
+            self.query_proj(motif_feat), motif_mask, pocket_key, prot_mask
+        )
 
-        motif_attn, _ = self.motif_to_prot(
-            query=motif_feat,
-            key=prot_feat,
-            value=prot_feat,
-            key_padding_mask=prot_key_padding,
-            need_weights=False,
-        )
-        motif_ctx = self.motif_norm(motif_feat + motif_attn)
-
-        return (
-            self.masked_mean(atom_ctx, atom_mask),
-            self.masked_mean(motif_ctx, motif_mask),
-        )
+        # Average the two views, renormalize over valid pocket nodes, and pool pocket features.
+        pocket_weight = (atom2pocket + motif2pocket) * 0.5
+        pocket_weight = pocket_weight * prot_mask
+        pocket_weight = pocket_weight / pocket_weight.sum(1).clamp_min(1e-12).unsqueeze(-1)
+        # [B, 1, Np] x [B, Np, D] -> [B, 1, D] -> [B, D].
+        return torch.bmm(pocket_weight.unsqueeze(1), prot_feat).squeeze(1)
 
 
 class DTAPocketCrossHead(nn.Module):
@@ -142,19 +135,17 @@ class DTAPocketCrossHead(nn.Module):
     def __init__(self, emb_dim: int = 128, dropout: float = 0.2):
         super().__init__()
         self.fp_proj = nn.Sequential(
-            nn.Linear(3239, 512),
+            nn.Linear(3239, emb_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(512, emb_dim),
         )
         self.esm_global_proj = nn.Sequential(
-            nn.Linear(480, 256),
+            nn.Linear(480, emb_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(256, emb_dim),
         )
-        self.interaction = Interaction(emb_dim, num_heads=4, dropout=dropout)
-        self.mlp = MLPDecoder(emb_dim * 4, 1024, 256, 1, dropout=dropout)
+        self.interaction = Interaction(emb_dim)
+        self.mlp = MLPDecoder(emb_dim * 3, 1024, 256, 1, dropout=dropout)
 
     def forward(
         self,
@@ -171,7 +162,7 @@ class DTAPocketCrossHead(nn.Module):
         motif_d, motif_mask = to_dense_batch(motif_feat, motif_batch)
         prot_d, prot_mask = to_dense_batch(prot_feat, prot_batch)
 
-        atom_ctx, motif_ctx = self.interaction(
+        interaction_ctx = self.interaction(
             atom_d,
             atom_mask,
             motif_d,
@@ -182,7 +173,7 @@ class DTAPocketCrossHead(nn.Module):
         d_readout = self.fp_proj(fingerprint)
         p_readout = self.esm_global_proj(esm_global)
 
-        return self.mlp(torch.cat([atom_ctx, motif_ctx, d_readout, p_readout], dim=-1))
+        return self.mlp(torch.cat([interaction_ctx, d_readout, p_readout], dim=-1))
 
 
 class DTAModel(nn.Module):
@@ -238,7 +229,7 @@ class DTAModel(nn.Module):
         atom_nodes, atom_batch = self.atom_encoder(data.hetero)
         motif_nodes, motif_batch = self.motif_encoder(data.hetero)
         prot_nodes, prot_batch = self.pocket_encoder(
-            data.pocket_graph.x[:, 41:],
+            data.pocket_graph.x[:, 41:],  #  ESM-2 480+ Surface 128
             data.pocket_graph.edge_index,
             data.pocket_graph.edge_attr,
             data.pocket_graph.coords,

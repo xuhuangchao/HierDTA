@@ -68,6 +68,7 @@ data/**/*.pickle
 backup_code/
 tmp/
 temp/
+DrugCLIP/
 *.tmp
 *.bak
 *.backup

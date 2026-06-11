@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument('--pocket_num_layers', type=int, default=2, help='Pocket GAT layers')
     parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom GAT layers')
     parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif GAT layers')
-    parser.add_argument('--run_name', type=str, default='inter', help='Output filename suffix')
+    parser.add_argument('--run_name', type=str, default='avg_am2pocket_sharedq', help='Output filename suffix')
 
     return parser.parse_args()
 
@@ -221,10 +221,7 @@ def main():
     test_loader = build_loader(test_data, args, shuffle=False)
 
     loss_fn = nn.MSELoss()
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, betas=(0.9, 0.999),
-        weight_decay=args.weight_decay,
-    )
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     result_path = os.path.join(output_dir, f'result_{args.run_name}.csv')
 

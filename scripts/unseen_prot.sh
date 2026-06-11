@@ -6,6 +6,6 @@ do
     --gpu_idx 0 \
     --strategy unseen_prot \
     --seed "${seed}" \
-    --run_name 0608_10A_egnn608_both \
+    --run_name avg_am2pocket_sharedq \
     "$@"
 done
