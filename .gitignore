@@ -33,6 +33,7 @@ output/
 outputs/
 runs/
 results/
+results_*/
 checkpoints/
 wandb/
 tensorboard/
@@ -52,17 +53,7 @@ lightning_logs/
 *.npy
 
 # Generated molecular/protein preprocessing artifacts
-data/**/surface_points/
-data/**/surface/
-data/**/*_chem_pretrained.pkl
-data/**/*_protein_pretrained.pkl
-data/**/*.pt
-data/**/*.pth
-data/**/*.ckpt
-data/**/*.npy
-data/**/*.npz
-data/**/*.pkl
-data/**/*.pickle
+data/
 
 # Temporary data and backups
 backup_code/

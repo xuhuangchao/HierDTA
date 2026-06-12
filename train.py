@@ -40,26 +40,12 @@ def parse_args():
     parser.add_argument('--split_root', type=str, default='data', help='Split csv root')
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
 
-    parser.add_argument('--epochs', type=int, default=300, help='Max training epochs')
-    parser.add_argument('--batch_size', type=int, default=256, help='Batch size')
-    parser.add_argument('--lr', type=float, default=5e-4, help='Peak learning rate')
-    parser.add_argument('--weight_decay', type=float, default=1e-4, help='AdamW weight decay')
+    parser.add_argument('--epochs', type=int, default=500, help='Max training epochs')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--lr', type=float, default=1e-4, help='Peak learning rate')
     parser.add_argument('--patience', type=int, default=30, help='Early stopping patience')
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     parser.add_argument('--log_interval', type=int, default=20, help='Training log interval')
-
-    parser.add_argument('--hidden_dim', type=int, default=128, help='Shared embedding dimension')
-    parser.add_argument('--num_tasks', type=int, default=1, help='Prediction output dimension')
-    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout')
-
-    parser.add_argument('--atom_in_dim', type=int, default=37, help='Atom feature dimension')
-    parser.add_argument('--atom_edge_dim', type=int, default=13, help='Atom edge feature dimension')
-    parser.add_argument('--motif_in_dim', type=int, default=50, help='Motif feature dimension')
-    parser.add_argument('--motif_edge_dim', type=int, default=37, help='Motif edge feature dimension')
-    parser.add_argument('--pocket_in_dim', type=int, default=608, help='Pocket residue node feature dimension')
-    parser.add_argument('--pocket_num_layers', type=int, default=2, help='Pocket GAT layers')
-    parser.add_argument('--atom_num_layers', type=int, default=2, help='Atom GAT layers')
-    parser.add_argument('--motif_num_layers', type=int, default=2, help='Motif GAT layers')
     parser.add_argument('--run_name', type=str, default='avg_am2pocket_sharedq', help='Output filename suffix')
 
     return parser.parse_args()
@@ -107,23 +93,6 @@ def build_loader(data, args, shuffle=False):
         num_workers=args.num_workers,
         collate_fn=dta_collate_fn,
         pin_memory=torch.cuda.is_available(),
-    )
-
-
-def build_model(args):
-    return DTAModel(
-        hidden_dim=args.hidden_dim,
-        num_tasks=args.num_tasks,
-        task='regression',
-        dropout=args.dropout,
-        atom_in_dim=args.atom_in_dim,
-        atom_edge_dim=args.atom_edge_dim,
-        motif_in_dim=args.motif_in_dim,
-        motif_edge_dim=args.motif_edge_dim,
-        pocket_in_dim=args.pocket_in_dim,
-        pocket_num_layers=args.pocket_num_layers,
-        atom_num_layers=args.atom_num_layers,
-        motif_num_layers=args.motif_num_layers,
     )
 
 
@@ -204,11 +173,10 @@ def main():
     print(f'Dataset: {dataset}')
     print(f'Strategy: {args.strategy}, seed: {args.seed}')
     print(f'Device: {device}')
-    print(f'Batch size: {args.batch_size}, lr: {args.lr}, weight_decay: {args.weight_decay}, epochs: {args.epochs}')
-    print(f'Hidden dim: {args.hidden_dim}, dropout: {args.dropout}')
+    print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
-    model = build_model(args).to(device)
+    model = DTAModel().to(device)
     print('Parameter counts:', model.count_parameters())
 
     drug_features, pocket_features = load_global_features(dataset, args.cache_dir)
@@ -221,7 +189,7 @@ def main():
     test_loader = build_loader(test_data, args, shuffle=False)
 
     loss_fn = nn.MSELoss()
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     result_path = os.path.join(output_dir, f'result_{args.run_name}.csv')
 

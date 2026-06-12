@@ -6,6 +6,6 @@ do
     --gpu_idx 1 \
     --strategy unseen_drug \
     --seed "${seed}" \
-    --run_name avg_am2pocket_sharedq \
+    --run_name pool_warmcos \
     "$@"
 done

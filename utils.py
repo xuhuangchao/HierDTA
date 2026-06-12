@@ -15,7 +15,7 @@ def load_global_features(dataset_name, cache_dir='data/cache'):
         f'{cache_dir}/{dataset_name}_drug_features.pt', weights_only=False
     )
     pocket_features = torch.load(
-        f'{cache_dir}/{dataset_name}_pocket_graphs.pt', weights_only=False
+        f'{cache_dir}/{dataset_name}_protein_graphs.pt', weights_only=False
     )
     print('Global caches loaded.')
     return drug_features, pocket_features
@@ -74,15 +74,12 @@ class TestbedDatasetHMol(Dataset):
             hetero['motif', 'connects', 'motif'].edge_index = torch.LongTensor(hg['mm_edge_index'])
             hetero['motif', 'connects', 'motif'].edge_attr = torch.FloatTensor(hg['mm_edge_attr'])
 
-            # Pocket residue graph from data/cache/{dataset}_pocket_graphs.pt.
+            # Protein graph from data/cache/{dataset}_protein_graphs.pt.
             pocket_data = self.pocket_features[key]
-            ei = torch.as_tensor(pocket_data['edge_index'], dtype=torch.int64)
-            ea = torch.as_tensor(pocket_data['edge_weight'], dtype=torch.float32)
             pocket_graph = DATA.Data(
                 x=torch.as_tensor(pocket_data['node_features'], dtype=torch.float32),
-                edge_index=ei,
-                edge_attr=ea,
-                coords=torch.as_tensor(pocket_data['residue_coords'], dtype=torch.float32),
+                edge_index=torch.as_tensor(pocket_data['edge_index'], dtype=torch.int64),
+                edge_attr=torch.as_tensor(pocket_data['edge_attr'], dtype=torch.float32),
             )
 
             data = DATA.Data(

@@ -1,2 +1,2 @@
 from .encoder import AtomGNN, PocketGraphEncoder
-from .dta_model import DTAPocketCrossHead, DTAModel, Interaction
+from .dta_model import FusionHead, DTAModel

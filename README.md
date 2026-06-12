@@ -1,172 +1,228 @@
 # HiSurf-DTA
 
-**HiSurf-DTA: Hierarchical Molecular and Surface-aware Protein Representation Learning for Drug-Target Affinity Prediction**
+HiSurf-DTA is a drug-target affinity prediction model built from an atom-level molecular graph, a protein residue graph, an ECFP fingerprint, and a full-sequence ESM-2 protein embedding.
 
-HiSurf-DTA is a multi-view drug-target affinity prediction framework. It combines hierarchical molecular graphs (atom + motif levels) with protein language-model-guided residue contact graphs and pocket surface features. The current implementation uses an **explicit cross-attention interaction module** (`Interaction`) that learns atom/motif-to-pocket-residue attention weights, replacing the earlier pure-concatenation baseline.
+The current implementation is a compact pooled-fusion version:
 
-## Key Contributions
+- Drug graph: atom graph only, encoded by one `GATv2Conv` branch.
+- Protein graph: residue graph from `{dataset}_protein_to_graph.pkl`, encoded by `GINConv`.
+- Drug global feature: ECFP4 fingerprint, 2048 bits.
+- Protein global feature: ESM-2 `esm2_t33_650M_UR50D` full-sequence mean embedding, 1280 dim.
+- Fusion: concatenate graph/global vectors and predict affinity with fully connected layers.
 
-1. **Hierarchical molecular representation.** HiSurf-DTA jointly models atom-level graphs, motif-level graphs, and Morgan fingerprints (ECFP4 + MACCS + Topological) to capture local chemical environments, functional substructures, and global molecular topology. Atom and motif graphs are encoded independently by `GATv2Conv`-based `AtomGNN` branches.
+## Current Architecture
 
-2. **Language-model-guided protein graph encoding.** ESM-2 (3B) residue embeddings (480-dim) serve as node features for the pocket residue graph, and distance-based edges are constructed with a 10Å cutoff. An **E(n)-equivariant graph neural network (EGNN)** aggregates structural and sequence-aware protein information with coordinate-aware message passing, ensuring rotation/translation invariance of learned features.
+### Drug Atom Graph
 
-3. **Independent pocket surface modeling.** Up to 512 dMaSIF surface point embeddings (128-dim) describe the local pocket environment. These are concatenated with ESM-2 embeddings as pocket node features (608-dim total, excluding 41-dim physical features), without requiring a potentially noisy residue-to-surface mapping.
+The molecular heterogeneous graph is still built by `preprocessing.chemutils`, but only the atom graph is consumed by the model.
 
-4. **Explicit drug–protein cross-attention.** The `Interaction` module computes bidirectional attention — atom→pocket and motif→pocket — with a shared drug-side query projection. The two attention views are averaged to produce per-residue pocket weights, which are then used to pool pocket features into a single interaction context vector. This provides an interpretable binding-mode signal.
+```text
+atom node feature: [N_atom, 37]
+atom edge feature: [E_atom, 13]
 
-5. **Complementary global features.** Morgan fingerprint (3239-dim) and ESM-2 full-sequence mean-pool embedding (480-dim) are projected and concatenated with the interaction context, providing global molecular and protein-level information that complements the local cross-attention signal.
+GATv2Conv(37 -> 37, heads=2, concat=True)
+ReLU
+GraphPool(mean + add + max): [B, 37 * 2 * 3] = [B, 222]
+Linear(222 -> 1024)
+ReLU
+Dropout(0.3)
 
-## Model Overview
-
-The prediction head (`DTAPocketCrossHead`) receives three vectors after fusion:
-
-1. **`interaction_ctx`** (128-dim): atom/motif-to-pocket cross-attention pooled pocket features. This captures which pocket residues are most relevant to the drug's atoms and functional motifs — the core interaction signal.
-
-2. **`d_readout`** (128-dim): projected Morgan fingerprint (ECFP4 1024 + MACCS 166 + Topological 2048 = 3239 → 128). Captures global molecular topology and pharmacophore patterns.
-
-3. **`p_readout`** (128-dim): projected ESM-2 full-sequence mean-pool embedding (480 → 128). Captures global protein sequence-level information from a pre-trained 3B-parameter protein language model.
-
-The three 128-dim vectors are concatenated (384-dim) and passed to a 3-layer MLP regression head (384 → 1024 → 256 → 1).
-
-### Architecture Diagram
-
-```
-SMILES                              PDB Pocket
-   │                                     │
-   ├─ HeteroGraph                       ├─ Pocket Graph
-   │  ├─ atom nodes (37-dim)            │  ├─ ESM-2 emb (480-dim)
-   │  ├─ motif nodes (50-dim)           │  ├─ dMaSIF surface (128-dim)
-   │  └─ 3 edge types                   │  ├─ Cα coords (3-dim)
-   │                                     │  └─ distance edges (2-dim)
-   ▼                                     ▼
-AtomGNN (GATv2Conv ×2)            PocketGraphEncoder (EGNN ×2)
-   │                                     │
-   ├─ atom_nodes [B,Na,128]              ├─ prot_nodes [B,Np,128]
-   └─ motif_nodes [B,Nm,128]             │
-         │         │                     │
-         └────┬────┘                     │
-              ▼                          ▼
-         Interaction (Cross-Attention)
-         ├─ atom → pocket attn
-         ├─ motif → pocket attn
-         └─ average → weighted pool
-              │
-              ▼
-         interaction_ctx (128)
-              │
-    ┌─────────┼─────────┐
-    ▼         ▼         ▼
- [ctx]  [fp_proj]  [esm_proj]
- (128)   (128)      (128)
-    │         │         │
-    └─────────┼─────────┘
-              ▼
-         MLP (384→1024→256→1)
-              │
-              ▼
-         Affinity Score
+drug_graph: [B, 1024]
 ```
 
-### Key Architectural Decisions
+The motif graph is currently not used.
 
-| Component | Choice | Rationale |
-|-----------|--------|-----------|
-| Drug encoder | `GATv2Conv` (×2 layers) | Dynamic attention over atom/motif neighborhoods |
-| Pocket encoder | `EGNN` (×2 layers, E(n)-equivariant) | Rotation/translation-invariant 3D structure encoding |
-| Cross-attention | Single-head, shared query, dual-view average | Balances atom-level and motif-level binding signals |
-| Fusion | [interaction_ctx ‖ fp_proj ‖ esm_proj] → MLP | Interaction signal + global drug info + global protein info |
-| Embedding dim | 128 (all branches) | Uniform bottleneck for cross-modal compatibility |
+### Protein Graph
+
+Protein graph data is converted from:
+
+```text
+data/{dataset}/{dataset}_protein_to_graph.pkl
+```
+
+and saved as:
+
+```text
+data/cache/{dataset}_protein_graphs.pt
+```
+
+Each protein entry contains:
+
+```python
+{
+    "node_features": Tensor[N, 41],
+    "edge_index": Tensor[2, E],
+    "edge_attr": Tensor[E, 10],
+    "esm_global": Tensor[1280],
+    "source_key": str,
+}
+```
+
+The protein graph encoder uses:
+
+```text
+GINConv: 41 -> 256
+ReLU
+GraphPool(mean + add + max): [B, 256 * 3] = [B, 768]
+Linear(768 -> 1024)
+BatchNorm1d
+ReLU
+Dropout(0.3)
+
+protein_graph: [B, 1024]
+```
+
+`edge_attr` is loaded and stored but is not consumed by the current `GINConv` encoder.
+
+### Global Features
+
+Drug fingerprint:
+
+```text
+ECFP4, radius=2, fpSize=2048
+Linear(2048 -> 256)
+BatchNorm1d
+ReLU
+Dropout(0.5)
+```
+
+Protein global feature:
+
+```text
+ESM-2 esm2_t33_650M_UR50D
+full-sequence mean pooling
+esm_global: [1280]
+
+Linear(1280 -> 256)
+BatchNorm1d
+ReLU
+Dropout(0.5)
+```
+
+Long protein sequences are processed in chunks of up to 1022 residues and then mean-pooled over all residue embeddings.
+
+### Final Prediction Head
+
+```text
+concat:
+  drug_graph      [B, 1024]
+  protein_graph   [B, 1024]
+  fp_proj         [B, 256]
+  esm_global_proj [B, 256]
+
+fusion input: [B, 2560]
+
+Linear(2560 -> 2048) -> BatchNorm1d -> ReLU -> Dropout(0.5)
+Linear(2048 -> 1024) -> BatchNorm1d -> ReLU -> Dropout(0.5)
+Linear(1024 -> 512)  -> BatchNorm1d -> ReLU -> Dropout(0.5)
+Linear(512 -> 1)
+```
 
 ## Data Layout
 
-Place the source files under:
+Expected source files:
 
 ```text
 data/{dataset}/
-├── {dataset}_drugs.csv
-├── {dataset}_prots.csv
-├── {dataset}_esmc_pretrain.pkl
-├── {dataset}_esm2_contact_map.pkl
-└── pocket1_{dataset}/
+  {dataset}_drugs.csv
+  {dataset}_prots.csv
+  {dataset}_protein_to_graph.pkl
 ```
 
-The split files are expected at:
+Expected split files:
 
 ```text
 data/{dataset}/seed_{seed}/{strategy}/
-├── train.csv
-├── valid.csv
-└── test.csv
+  train.csv
+  valid.csv
+  test.csv
 ```
 
-Supported split seeds:
-
-```text
-41, 42, 43, 32, 33
-```
-
-Supported strategies:
+Supported split strategies:
 
 ```text
 warm, unseen_drug, unseen_prot, unseen_pair
 ```
 
-## Preprocessing
-
-Preprocessing scripts are grouped under:
+Supported seeds:
 
 ```text
-preprocessing/
-├── esmc_pretrained.py      # ESM-C (600M) per-residue embeddings
-├── esm2_map.py             # ESM-2 (3B) contact probability maps
-├── surface_process.py      # dMaSIF pocket surface point extraction (≤512 points)
-├── create_data.py          # Global drug & protein feature cache builder
-├── create_drug_data.py     # Alternative drug cache (adds ChemBERTa token features)
-├── cold_split.py           # Warm / cold-drug / cold-protein / cold-pair split generator
-├── protein_process.py      # 41-dim physical residue features (type, distances, dihedrals)
-├── build_pocket_graph.py   # Pocket residue graph: phys(41) + ESM2(480) + surface(128) = 649-dim
-└── chemutils.py            # Heterogeneous molecular graph builder (atom + motif nodes)
+41, 42, 43, 32, 33
 ```
 
-If language-model features need to be regenerated, run:
+## Preprocessing
+
+Build drug features:
 
 ```bash
-python preprocessing/esmc_pretrained.py
-python preprocessing/esm2_map.py
+python preprocessing/create_drug_data.py --dataset davis
 ```
 
-Run surface extraction before cache generation:
+This creates:
 
-```bash
-python preprocessing/surface_process.py --dataset davis
+```text
+data/cache/{dataset}_drug_features.pt
 ```
 
-Then build the pocket graph cache:
+with:
+
+```python
+{
+    smiles: {
+        "fingerprint": np.ndarray[2048],
+        "hetero_graph": ...
+    }
+}
+```
+
+Build protein graph features:
 
 ```bash
 python preprocessing/build_pocket_graph.py --dataset davis
 ```
 
-Then build the global drug feature cache:
+This creates:
 
-```bash
-python preprocessing/create_data.py --dataset davis
+```text
+data/cache/{dataset}_protein_graphs.pt
 ```
 
-Generate training splits with:
+The script maps CSV target keys to legacy `{dataset}_protein_to_graph.pkl` keys. For DAVIS, the current resolver covers all targets:
+
+```text
+direct match: 404
+fallback mapped: 38
+missing: 0
+```
+
+Typical fallback cases include:
+
+```text
+ABL1(F317I)p -> ABL1(F317I)-phosphorylated
+ABL1(F317I)  -> ABL1(F317I)-nonphosphorylated
+RSK3(KinDom.1-N-terminal) -> RSK3(Kin.Dom.1-N-terminal)
+EGFR(L747E749del) -> EGFR(L747-E749del, A750P)
+```
+
+For KIBA, the same resolver directly matches all CSV targets checked in this workspace:
+
+```text
+direct match: 228
+fallback mapped: 0
+missing: 0
+```
+
+`build_pocket_graph.py` requires `fair-esm` for ESM-2:
+
+```bash
+pip install fair-esm
+```
+
+Generate split files if needed:
 
 ```bash
 python preprocessing/cold_split.py --dataset davis --seeds 41 42 43 32 33
 ```
-
-Generated caches:
-
-```text
-data/cache/{dataset}_drug_features.pt      # SMILES → {hetero_graph, fingerprint}
-data/cache/{dataset}_pocket_graphs.pt      # target_key → {node_features[649], edge_index, coords, esm_global[480]}
-```
-
-During cache generation, `target2graph()` prints the residue feature shape and protein graph edge-index shape for each target.
 
 ## Training
 
@@ -176,40 +232,65 @@ Train one split:
 python train.py --dataset davis --strategy warm --seed 41
 ```
 
-Run all configured seeds for one strategy:
+Default training settings:
 
-```bash
-bash scripts/warm.sh
-```
+| Parameter | Default |
+|-----------|---------|
+| `--epochs` | 500 |
+| `--batch_size` | 32 |
+| `--lr` | 1e-4 |
+| `--patience` | 30 |
+| optimizer | Adam |
 
-Equivalent scripts are available for `unseen_drug`, `unseen_prot`, and `unseen_pair`.
-
-### Key Training Hyperparameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--epochs` | 300 | Max training epochs |
-| `--batch_size` | 256 | Batch size |
-| `--lr` | 5e-4 | Learning rate (AdamW) |
-| `--weight_decay` | 1e-4 | AdamW weight decay |
-| `--patience` | 30 | Early stopping patience |
-| `--hidden_dim` | 128 | Shared embedding dimension |
-| `--dropout` | 0.2 | Dropout rate |
-| `--atom_num_layers` | 2 | Atom GNN layers |
-| `--motif_num_layers` | 2 | Motif GNN layers |
-| `--pocket_num_layers` | 2 | Pocket EGNN layers |
-
-The optimizer uses AdamW:
+The optimizer is:
 
 ```python
-torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+torch.optim.Adam(model.parameters(), lr=args.lr)
 ```
 
-### Evaluation Metrics
+## Choosing Graph Layer Counts
 
-Five metrics are computed on GPU:
-- **RMSE** (Root Mean Squared Error)
-- **MSE** (Mean Squared Error)
-- **Pearson** correlation coefficient
-- **CI** (Concordance Index)
-- **RM²** (modified R²)
+The current default is deliberately shallow:
+
+```text
+atom_num_layers = 1
+pocket_num_layers = 1
+```
+
+This is a reasonable starting point for the current design because both branches use graph-level pooling and large dense fusion layers. The ECFP and ESM-2 global vectors already provide strong nonlocal information, so deeper message passing is not automatically better.
+
+Recommended search:
+
+| Branch | Try | Recommendation |
+|--------|-----|----------------|
+| Atom GATv2 | 1, 2, 3 | Start with 1. Try 2 if warm split underfits. Be cautious with 3. |
+| Protein GIN | 1, 2, 3 | Start with 1 or 2. Use 2 if cold-protein improves. Avoid 3 unless validation supports it. |
+
+Practical guidance:
+
+- For DAVIS, atom graphs are small and atom features are already local; 1 GATv2 layer plus ECFP2048 is usually a strong baseline.
+- For protein graphs, 1 GIN layer captures immediate residue-neighborhood signals; 2 layers may help propagate broader local structure.
+- 3 layers can oversmooth protein node features and increase overfitting risk, especially with DAVIS-scale data.
+- Because final fusion is large, evaluate deeper GNNs with validation MSE and cold-split metrics, not training loss.
+
+Suggested ablation grid:
+
+```text
+atom_layers, protein_layers
+1, 1
+1, 2
+2, 1
+2, 2
+```
+
+Only try `(3, 2)` or `(2, 3)` after the four smaller settings show clear underfitting.
+
+## Evaluation Metrics
+
+Training reports:
+
+- RMSE
+- MSE
+- Pearson
+- CI
+- rm2
