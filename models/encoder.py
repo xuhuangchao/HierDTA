@@ -22,19 +22,24 @@ class AtomGNN(nn.Module):
         edge_key=("atom", "bond", "atom"),
     ):
         super().__init__()
-        if num_layers != 1:
-            raise ValueError("AtomGNN is configured as a single GATv2Conv layer.")
         self.node_key = node_key
         self.edge_key = edge_key
         self.graph_pool_type = graph_pool_type
-        self.conv = GATv2Conv(
-            in_dim,
-            in_dim,
-            heads=heads,
-            concat=True,
-            edge_dim=edge_dim,
-            dropout=gat_dropout,
-        )
+
+        self.convs = nn.ModuleList()
+        layer_in = in_dim
+        for _ in range(num_layers):
+            self.convs.append(
+                GATv2Conv(
+                    layer_in,
+                    in_dim,
+                    heads=heads,
+                    concat=True,
+                    edge_dim=edge_dim,
+                    dropout=gat_dropout,
+                )
+            )
+            layer_in = in_dim * heads
         self.activation = nn.ReLU()
 
         conv_out_dim = in_dim * heads
@@ -69,7 +74,8 @@ class AtomGNN(nn.Module):
         batch = data[self.node_key].batch
         edge_index = data[self.edge_key].edge_index
         edge_attr = data[self.edge_key].edge_attr
-        x = self.activation(self.conv(x, edge_index, edge_attr=edge_attr))
+        for conv in self.convs:
+            x = self.activation(conv(x, edge_index, edge_attr=edge_attr))
 
         return self.graph_proj(self._pool(x, batch, self.graph_pool_type))
 

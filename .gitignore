@@ -59,7 +59,6 @@ data/
 backup_code/
 tmp/
 temp/
-DrugCLIP/
 *.tmp
 *.bak
 *.backup
@@ -76,3 +75,9 @@ DrugCLIP/
 # Keep lightweight dataset metadata and source files trackable.
 !data/**/*.csv
 !data/**/*.pdb
+
+# Ignore heavy subdirectories under data/metz/ and entire data/bindingDB/
+data/metz/prot_3D_for_Metz/
+data/metz/seed_*/
+data/bindingDB/
+data/cache/

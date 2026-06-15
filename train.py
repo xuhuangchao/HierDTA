@@ -39,6 +39,8 @@ def parse_args():
     parser.add_argument('--cache_dir', type=str, default='data/cache', help='Global cache directory')
     parser.add_argument('--split_root', type=str, default='data', help='Split csv root')
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
+    parser.add_argument('--drug_graph_type', type=str, default='atom', choices=['atom', 'motif', 'dual'],
+                        help='Drug graph branch to encode')
 
     parser.add_argument('--epochs', type=int, default=500, help='Max training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
@@ -176,7 +178,7 @@ def main():
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
-    model = DTAModel().to(device)
+    model = DTAModel(drug_graph_type=args.drug_graph_type).to(device)
     print('Parameter counts:', model.count_parameters())
 
     drug_features, pocket_features = load_global_features(dataset, args.cache_dir)
