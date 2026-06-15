@@ -2,7 +2,7 @@
 
 Hierarchical Drug-Target Affinity prediction model that jointly encodes atom-level and motif-level molecular graphs, a protein residue graph, and global sequence/fingerprint features.
 
-## Architecture Overview
+## 🏗️ Architecture Overview
 
 ```
                     ┌──────────────────────────────┐
@@ -23,7 +23,7 @@ Hierarchical Drug-Target Affinity prediction model that jointly encodes atom-lev
                     └────────────────────┘
 ```
 
-## Drug Graph Encoder
+## 💊 Drug Graph Encoder
 
 The molecular heterogeneous graph is built by `preprocessing/chemutils.py` via HimGNN-style functional-group decomposition (38 rule-based detectors from `func_group/Substructure_Extraction.py`). The graph contains two node types and three edge types:
 
@@ -75,7 +75,7 @@ gate = σ(Linear(cat(atom_vec, motif_vec))) [B, 1024]
 
 The gate is a per-dimension sigmoid mask learned from the concatenated representations. `g ≈ 1` means the dimension relies on atom signal; `g ≈ 0` means it relies on motif signal. The fused output retains 1024 dimensions so the downstream `FusionHead` is unchanged.
 
-## Protein Graph Encoder
+## 🧬 Protein Graph Encoder
 
 Residue-level pocket graph from `data/{dataset}/{dataset}_protein_to_graph.pkl`, cached as `data/cache/{dataset}_protein_graphs.pt`.
 
@@ -101,7 +101,7 @@ Linear(768 → 1024) → BatchNorm1d → ReLU → Dropout(0.3)
 prot_graph: [B, 1024]
 ```
 
-## Global Features
+## 🌐 Global Features
 
 | Feature           | Source                                    | Dim       | Projection                                      |
 | ----------------- | ----------------------------------------- | --------- | ----------------------------------------------- |
@@ -110,7 +110,7 @@ prot_graph: [B, 1024]
 
 Long protein sequences are chunked at 1022 residues; chunk embeddings are mean-pooled into the final 1280-dim vector.
 
-## Fusion Head
+## ⚡ Fusion Head
 
 ```text
 concat([drug_graph, prot_graph, fp_proj, esm_proj]): [B, 2560]
@@ -121,7 +121,7 @@ Linear(1024 →  512) → BatchNorm1d → ReLU → Dropout(0.5)
 Linear(512  →    1)
 ```
 
-## Data Layout
+## 📂 Data Layout
 
 ### Source files
 
@@ -154,7 +154,7 @@ data/{dataset}/seed_{seed}/{strategy}/
 
 `41, 42, 43, 32, 33`
 
-## Preprocessing
+## ⚙️ Preprocessing
 
 ### 1. Build drug features
 
@@ -202,7 +202,7 @@ Creates `data/cache/{dataset}_protein_graphs.pt`. The script maps CSV target key
 python preprocessing/cold_split.py --dataset davis --seeds 41 42 43 32 33
 ```
 
-## Training
+## 🚀 Training
 
 Single run:
 
@@ -237,7 +237,7 @@ bash scripts/unseen_pair.sh
 
 Optimizer: `torch.optim.Adam(model.parameters(), lr=args.lr)`. Loss: `nn.MSELoss`.
 
-## Evaluation Metrics
+## 📊 Evaluation Metrics
 
 Reported per epoch and at test time:
 
@@ -251,7 +251,7 @@ Reported per epoch and at test time:
 
 All metrics are computed on GPU via `utils.py`.
 
-## Project Structure
+## 📁 Project Structure
 
 ```
 HierDTA/
@@ -293,6 +293,11 @@ HierDTA/
 └── results_{dataset}/                    # Checkpoints and per-seed metrics 
 ```
 
-## Citation
+## 📝 Citation
 
 If you use HierDTA in your research, please cite our work.
+
+## 🙏 Acknowledgements
+
+- Residue-level protein graph construction method adapted from [vtarasv/3d-prot-dta](https://github.com/vtarasv/3d-prot-dta)
+- Functional-group motif decomposition adapted from [UnHans/HimGNN](https://github.com/UnHans/HimGNN)
