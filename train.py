@@ -41,6 +41,23 @@ def parse_args():
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
     parser.add_argument('--drug_graph_type', type=str, default='atom', choices=['atom', 'motif', 'dual'],
                         help='Drug graph branch to encode')
+    parser.add_argument(
+        '--graph_pool_type',
+        type=str,
+        default='mean_add_max',
+        choices=[
+            'mean', 'add', 'max',
+            'mean_add', 'mean_max', 'add_max', 'mean_add_max',
+        ],
+        help='Graph readout shared by atom, motif, and pocket encoders; add means sum pooling',
+    )
+    parser.add_argument(
+        '--modality_ablation',
+        type=str,
+        default='none',
+        choices=['none', 'drug_fingerprint', 'drug_graph', 'protein_graph', 'protein_seq'],
+        help='Remove one modality from the FusionHead concatenated input',
+    )
 
     parser.add_argument('--epochs', type=int, default=500, help='Max training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
@@ -176,9 +193,14 @@ def main():
     print(f'Strategy: {args.strategy}, seed: {args.seed}')
     print(f'Device: {device}')
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
+    print(f'Graph pooling: {args.graph_pool_type}, modality ablation: {args.modality_ablation}')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
-    model = DTAModel(drug_graph_type=args.drug_graph_type).to(device)
+    model = DTAModel(
+        drug_graph_type=args.drug_graph_type,
+        graph_pool_type=args.graph_pool_type,
+        modality_ablation=args.modality_ablation,
+    ).to(device)
     print('Parameter counts:', model.count_parameters())
 
     drug_features, pocket_features = load_global_features(dataset, args.cache_dir)

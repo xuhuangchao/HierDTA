@@ -1,6 +1,6 @@
 """Top-level DTA model and custom batching for nested PyG graph objects."""
 
-from typing import Any, List
+from typing import Any, List, Optional
 
 import torch
 import torch.nn as nn
@@ -119,34 +119,61 @@ class FusionHead(nn.Module):
         esm_in_dim: int = 1280,
         esm_out_dim: int = 256,
         dropout: float = 0.5,
+        modality_ablation: str = "none",
     ):
         super().__init__()
-        self.fp_proj = nn.Sequential(
-            nn.Linear(fp_dim, fp_out_dim),
-            nn.BatchNorm1d(fp_out_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-        )
-        self.esm_global_proj = nn.Sequential(
-            nn.Linear(esm_in_dim, esm_out_dim),
-            nn.BatchNorm1d(esm_out_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-        )
-        fusion_dim = drug_graph_dim + pocket_graph_dim + fp_out_dim + esm_out_dim
+        self.modality_ablation = modality_ablation
+        self.fp_proj = None
+        if modality_ablation != "drug_fingerprint":
+            self.fp_proj = nn.Sequential(
+                nn.Linear(fp_dim, fp_out_dim),
+                nn.BatchNorm1d(fp_out_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            )
+
+        self.esm_global_proj = None
+        if modality_ablation != "protein_seq":
+            self.esm_global_proj = nn.Sequential(
+                nn.Linear(esm_in_dim, esm_out_dim),
+                nn.BatchNorm1d(esm_out_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+            )
+
+        fusion_dim = 0
+        if modality_ablation != "drug_graph":
+            fusion_dim += drug_graph_dim
+        if modality_ablation != "protein_graph":
+            fusion_dim += pocket_graph_dim
+        if self.fp_proj is not None:
+            fusion_dim += fp_out_dim
+        if self.esm_global_proj is not None:
+            fusion_dim += esm_out_dim
         self.mlp = FinalFCLayers(fusion_dim, 1, dropout=0.5)
 
     def forward(
         self,
-        atom_graph: Tensor,
-        prot_graph: Tensor,
+        atom_graph: Optional[Tensor],
+        prot_graph: Optional[Tensor],
         fingerprint: Tensor,
         esm_global: Tensor,
     ) -> Tensor:
-        d_readout = self.fp_proj(fingerprint)
-        p_readout = self.esm_global_proj(esm_global)
+        fusion_inputs = []
+        if self.modality_ablation != "drug_graph":
+            if atom_graph is None:
+                raise ValueError("atom_graph is required unless drug_graph is ablated")
+            fusion_inputs.append(atom_graph)
+        if self.modality_ablation != "protein_graph":
+            if prot_graph is None:
+                raise ValueError("prot_graph is required unless protein_graph is ablated")
+            fusion_inputs.append(prot_graph)
+        if self.fp_proj is not None:
+            fusion_inputs.append(self.fp_proj(fingerprint))
+        if self.esm_global_proj is not None:
+            fusion_inputs.append(self.esm_global_proj(esm_global))
 
-        return self.mlp(torch.cat([atom_graph, prot_graph, d_readout, p_readout], dim=-1))
+        return self.mlp(torch.cat(fusion_inputs, dim=-1))
 
 
 class DTAModel(nn.Module):
@@ -166,6 +193,8 @@ class DTAModel(nn.Module):
         atom_num_layers: int = 1,
         motif_num_layers: int = 1,
         drug_graph_out_dim: int = 1024,
+        graph_pool_type: str = "mean_add_max",
+        modality_ablation: str = "none",
         fp_dim: int = 2048,
         fp_out_dim: int = 256,
         esm_in_dim: int = 1280,
@@ -175,15 +204,24 @@ class DTAModel(nn.Module):
         super().__init__()
         if drug_graph_type not in ("atom", "motif", "dual"):
             raise ValueError("drug_graph_type must be 'atom', 'motif', or 'dual'")
+        valid_ablations = {
+            "none", "drug_fingerprint", "drug_graph", "protein_graph", "protein_seq"
+        }
+        if modality_ablation not in valid_ablations:
+            raise ValueError(
+                f"modality_ablation must be one of {sorted(valid_ablations)}"
+            )
 
         self.drug_graph_type = drug_graph_type
+        self.modality_ablation = modality_ablation
 
         # ── drug encoder(s) ──────────────────────────────────────────
-        if drug_graph_type in ("atom", "dual"):
+        if modality_ablation != "drug_graph" and drug_graph_type in ("atom", "dual"):
             self.atom_encoder = AtomGNN(
                 in_dim=atom_in_dim,
                 edge_dim=atom_edge_dim,
                 num_layers=atom_num_layers,
+                graph_pool_type=graph_pool_type,
                 graph_out_dim=drug_graph_out_dim,
                 node_key="atom",
                 edge_key=("atom", "bond", "atom"),
@@ -191,11 +229,12 @@ class DTAModel(nn.Module):
         else:
             self.atom_encoder = None
 
-        if drug_graph_type in ("motif", "dual"):
+        if modality_ablation != "drug_graph" and drug_graph_type in ("motif", "dual"):
             self.motif_encoder = AtomGNN(
                 in_dim=motif_in_dim,
                 edge_dim=motif_edge_dim,
                 num_layers=motif_num_layers,
+                graph_pool_type=graph_pool_type,
                 graph_out_dim=drug_graph_out_dim,
                 node_key="motif",
                 edge_key=("motif", "connects", "motif"),
@@ -203,7 +242,7 @@ class DTAModel(nn.Module):
         else:
             self.motif_encoder = None
 
-        if drug_graph_type == "dual":
+        if modality_ablation != "drug_graph" and drug_graph_type == "dual":
             self.drug_fusion = GatedDrugFusion(
                 atom_dim=drug_graph_out_dim,
                 motif_dim=drug_graph_out_dim,
@@ -213,14 +252,17 @@ class DTAModel(nn.Module):
             self.drug_fusion = None
 
         # ── protein encoder ──────────────────────────────────────────
-        self.pocket_encoder = PocketGraphEncoder(
-            pocket_in_dim=pocket_in_dim,
-            hidden_dim=pocket_hidden_dim,
-            num_layers=pocket_num_layers,
-            graph_out_dim=pocket_graph_out_dim,
-        )
+        self.pocket_encoder = None
+        if modality_ablation != "protein_graph":
+            self.pocket_encoder = PocketGraphEncoder(
+                pocket_in_dim=pocket_in_dim,
+                hidden_dim=pocket_hidden_dim,
+                num_layers=pocket_num_layers,
+                graph_pool_type=graph_pool_type,
+                graph_out_dim=pocket_graph_out_dim,
+            )
 
-        # ── fusion head (dimensions unchanged for backward compat) ───
+        # ── fusion head (input dimension follows the retained modalities) ───
         self.fusion_head = FusionHead(
             drug_graph_dim=drug_graph_out_dim,
             pocket_graph_dim=pocket_graph_out_dim,
@@ -229,23 +271,29 @@ class DTAModel(nn.Module):
             esm_in_dim=esm_in_dim,
             esm_out_dim=esm_out_dim,
             dropout=dropout,
+            modality_ablation=modality_ablation,
         )
 
     def forward(self, data: DTABatch) -> Tensor:
-        if self.drug_graph_type == "dual":
-            atom_graph = self.atom_encoder(data.hetero)
-            motif_graph = self.motif_encoder(data.hetero)
-            drug_graph = self.drug_fusion(atom_graph, motif_graph)
-        elif self.drug_graph_type == "motif":
-            drug_graph = self.motif_encoder(data.hetero)
-        else:
-            drug_graph = self.atom_encoder(data.hetero)
+        drug_graph = None
+        if self.modality_ablation != "drug_graph":
+            if self.drug_graph_type == "dual":
+                atom_graph = self.atom_encoder(data.hetero)
+                motif_graph = self.motif_encoder(data.hetero)
+                drug_graph = self.drug_fusion(atom_graph, motif_graph)
+            elif self.drug_graph_type == "motif":
+                drug_graph = self.motif_encoder(data.hetero)
+            else:
+                drug_graph = self.atom_encoder(data.hetero)
 
-        prot_graph = self.pocket_encoder(
-            data.pocket_graph.x,
-            data.pocket_graph.edge_index,
-            data.pocket_graph.batch,
-        )
+        prot_graph = None
+        if self.modality_ablation != "protein_graph":
+            prot_graph = self.pocket_encoder(
+                data.pocket_graph.x,
+                data.pocket_graph.edge_index,
+                data.pocket_graph.batch,
+            )
+
         return self.fusion_head(
             atom_graph=drug_graph,
             prot_graph=prot_graph,
