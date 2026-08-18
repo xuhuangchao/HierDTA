@@ -202,6 +202,7 @@ class DTAModel(nn.Module):
         esm_out_dim: int = 256,
         dropout: float = 0.5,
         atom_motif_mode: str = "none",
+        protein_graph_mode: str = "cov",
     ):
         super().__init__()
         if drug_graph_type not in ("atom", "motif", "dual"):
@@ -210,6 +211,10 @@ class DTAModel(nn.Module):
             raise ValueError("atom_motif_mode must be 'none' or 'bottom_up'")
         if atom_motif_mode == "bottom_up" and drug_graph_type != "dual":
             raise ValueError("atom_motif_mode='bottom_up' requires drug_graph_type='dual'")
+        if protein_graph_mode not in ("cov", "noncov", "dual_view"):
+            raise ValueError(
+                "protein_graph_mode must be 'cov', 'noncov', or 'dual_view'"
+            )
         valid_ablations = {
             "none", "drug_fingerprint", "drug_graph", "protein_graph", "protein_seq"
         }
@@ -220,6 +225,7 @@ class DTAModel(nn.Module):
 
         self.drug_graph_type = drug_graph_type
         self.atom_motif_mode = atom_motif_mode
+        self.protein_graph_mode = protein_graph_mode
         self.modality_ablation = modality_ablation
 
         # ── drug encoder(s) ──────────────────────────────────────────
@@ -278,6 +284,8 @@ class DTAModel(nn.Module):
                 num_layers=protein_num_layers,
                 graph_pool_type=graph_pool_type,
                 graph_out_dim=protein_graph_out_dim,
+                protein_edge_dim=10,
+                protein_graph_mode=protein_graph_mode,
             )
 
         # ── fusion head (input dimension follows the retained modalities) ───
@@ -332,6 +340,7 @@ class DTAModel(nn.Module):
                 data.protein_graph.x,
                 data.protein_graph.edge_index,
                 data.protein_graph.batch,
+                data.protein_graph.edge_attr,
             )
 
         return self.fusion_head(

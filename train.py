@@ -59,6 +59,16 @@ def parse_args():
         help='Graph readout shared by atom, motif, and protein encoders; add means sum pooling',
     )
     parser.add_argument(
+        '--protein_graph_mode',
+        type=str,
+        default='dual_view',
+        choices=['cov', 'noncov', 'dual_view'],
+        help=(
+            'Protein residue graph encoder: covalent GIN, exclusive '
+            'noncovalent GINE, or their node-concatenated dual view'
+        ),
+    )
+    parser.add_argument(
         '--modality_ablation',
         type=str,
         default='none',
@@ -202,6 +212,7 @@ def main():
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
     print(
         f'Graph pooling: {args.graph_pool_type}, atom-motif mode: {args.atom_motif_mode}, '
+        f'protein graph mode: {args.protein_graph_mode}, '
         f'modality ablation: {args.modality_ablation}'
     )
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
@@ -210,6 +221,7 @@ def main():
         drug_graph_type=args.drug_graph_type,
         graph_pool_type=args.graph_pool_type,
         atom_motif_mode=args.atom_motif_mode,
+        protein_graph_mode=args.protein_graph_mode,
         modality_ablation=args.modality_ablation,
     ).to(device)
     print('Parameter counts:', model.count_parameters())

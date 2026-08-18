@@ -12,7 +12,7 @@ Hierarchical Drug-Target Affinity prediction model that jointly encodes atom-lev
                     │  motif: GATv2Conv on [M, 50]  │    (or dual → gated fusion)
                     └──────────────────────────────┘
                     ┌──────────────────────────────┐
-  data.protein_graph ┤ GINConv on [N_res, 41]       │──► protein_graph [B, 1024]
+  data.protein_graph ┤ covalent GIN / noncovalent GINE│──► protein_graph [B, 1024]
   data.esm_global ──┤  Linear(1280 → 256)           │──► esm_proj  [B,  256]
   data.fingerprint ─┤  Linear(2048 → 256)           │──► fp_proj   [B,  256]
                     └──────────────────────────────┘
@@ -94,20 +94,32 @@ Each protein entry:
 {
     "node_features": Tensor[N_res, 41],   # residue node features
     "edge_index":    Tensor[2, E],         # interaction edges within cutoff
-    "edge_attr":     Tensor[E, 10],        # interaction attr (not used)
+    "edge_attr":     Tensor[E, 10],        # covalent + 9 noncovalent channels
     "esm_global":    Tensor[1280],         # ESM-2 full-sequence mean embedding
     "source_key":    str,
 }
 ```
 
-Encoder:
+Protein graph modes (`--protein_graph_mode`):
+
+| Mode | Edge selection | Encoder | Fusion |
+| ---- | -------------- | ------- | ------ |
+| `cov` | `edge_attr[:, 0] == 1` | GIN | — |
+| `noncov` | `edge_attr[:, 0] == 0` and any channel 1–9 is active | GINE with 9D edge features | — |
+| `dual_view` | Both mutually exclusive views above | Covalent GIN + noncovalent GINE | Node concatenation + MLP |
+
+In `dual_view`, corresponding residue embeddings from both branches are
+concatenated and projected from 512 to 256 dimensions before graph pooling:
 
 ```text
-GINConv: 41 → 256
-ReLU
+Residue features [N, 41]
+  ├── covalent GIN ──────► [N, 256]
+  └── noncovalent GINE ───► [N, 256]
+                                  │
+                   concat + MLP: [N, 512] → [N, 256]
 GraphPool(mean + add + max): [B, 256×3] = [B, 768]
 Linear(768 → 1024) → BatchNorm1d → ReLU → Dropout(0.3)
-prot_graph: [B, 1024]
+protein_graph: [B, 1024]
 ```
 
 ## 🌐 Global Features
@@ -244,6 +256,7 @@ bash scripts/unseen_pair.sh
 | `--patience`        | 30       | Early stopping patience          |
 | `--drug_graph_type` | `atom` | `atom`, `motif`, or `dual` |
 | `--atom_motif_mode` | `none` | `none` or `bottom_up`; `bottom_up` requires `dual` |
+| `--protein_graph_mode` | `cov` | `cov`, `noncov`, or `dual_view` |
 
 Optimizer: `torch.optim.Adam(model.parameters(), lr=args.lr)`. Loss: `nn.MSELoss`.
 
@@ -272,7 +285,7 @@ HierDTA/
 ├── models/
 │   ├── __init__.py                       # Module exports
 │   ├── dta_model.py                      # DTAModel, FusionHead, GatedDrugFusion, DTABatch, collate
-│   └── encoder.py                        # AtomGNN (GATv2Conv), ProteinGraphEncoder (GINConv)
+│   └── encoder.py                        # AtomGNN (GATv2), ProteinGraphEncoder (GIN/GINE)
 │
 ├── preprocessing/
 │   ├── create_drug_data.py               # Drug feature cache builder (ECFP4 + hetero graph)

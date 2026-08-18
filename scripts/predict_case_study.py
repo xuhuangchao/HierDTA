@@ -49,6 +49,12 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--gpu_idx", type=int, default=0)
+    parser.add_argument(
+        "--protein_graph_mode",
+        default="cov",
+        choices=["cov", "noncov", "dual_view"],
+        help="Must match the protein graph mode used to train the checkpoint",
+    )
     parser.add_argument("--rebuild_cache", action="store_true")
     return parser.parse_args()
 
@@ -160,7 +166,10 @@ def main():
         f"cuda:{args.gpu_idx}" if torch.cuda.is_available() else "cpu"
     )
     print(f"Device: {device}")
-    model = DTAModel(drug_graph_type="dual").to(device)
+    model = DTAModel(
+        drug_graph_type="dual",
+        protein_graph_mode=args.protein_graph_mode,
+    ).to(device)
     state_dict = torch.load(args.checkpoint, map_location=device, weights_only=True)
     model.load_state_dict(state_dict, strict=True)
     print(f"Loaded checkpoint: {args.checkpoint}")

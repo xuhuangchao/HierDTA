@@ -12,6 +12,7 @@ do
     --seed "${seed}" \
     --drug_graph_type dual \
     --atom_motif_mode bottom_up \
+    --protein_graph_mode dual_view \
     --graph_pool_type mean_add_max \
     --run_name bottom_up_dual \
     "$@"
