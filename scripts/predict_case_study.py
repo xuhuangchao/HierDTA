@@ -145,7 +145,7 @@ def main():
         y=[0.0] * len(smiles),
         dataset_name=args.dataset,
         drug_features=drug_features,
-        pocket_features=protein_features,
+        protein_features=protein_features,
     )
     loader = DataLoader(
         dataset,

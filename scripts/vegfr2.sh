@@ -3,10 +3,10 @@ set -euo pipefail
 
 output_dir="outputs/case_study/vegfr2"
 
-# data/ABL1.csv contains only the target-independent drug library columns:
+# data/VEGFR2.csv (ABL1.csv) contains only the target-independent drug library columns:
 # drug_id, names, and drug_seq. Protein features are selected by --target.
 python scripts/predict_case_study.py \
-  --input data/ABL1.csv \
+  --input data/VEGFR2.csv \
   --smiles_column drug_seq \
   --target P35968 \
   --dataset kiba \

@@ -12,7 +12,7 @@ Hierarchical Drug-Target Affinity prediction model that jointly encodes atom-lev
                     │  motif: GATv2Conv on [M, 50]  │    (or dual → gated fusion)
                     └──────────────────────────────┘
                     ┌──────────────────────────────┐
-  data.pocket ──────┤  GINConv on [N_res, 41]       │──► prot_graph [B, 1024]
+  data.protein_graph ┤ GINConv on [N_res, 41]       │──► protein_graph [B, 1024]
   data.esm_global ──┤  Linear(1280 → 256)           │──► esm_proj  [B,  256]
   data.fingerprint ─┤  Linear(2048 → 256)           │──► fp_proj   [B,  256]
                     └──────────────────────────────┘
@@ -75,9 +75,18 @@ gate = σ(Linear(cat(atom_vec, motif_vec))) [B, 1024]
 
 The gate is a per-dimension sigmoid mask learned from the concatenated representations. `g ≈ 1` means the dimension relies on atom signal; `g ≈ 0` means it relies on motif signal. The fused output retains 1024 dimensions so the downstream `FusionHead` is unchanged.
 
+#### Optional Bottom-Up Atom→Motif Update
+
+With `--drug_graph_type dual --atom_motif_mode bottom_up`, atom embeddings
+produced by the atom GATv2 branch are mean-aggregated along the explicit
+`atom-in-motif` membership edges. A gated residual update injects the resulting
+context into the original 50-dimensional motif features before motif-level
+message passing. The default `--atom_motif_mode none` preserves the independent
+dual-branch behavior.
+
 ## 🧬 Protein Graph Encoder
 
-Residue-level pocket graph from `data/{dataset}/{dataset}_protein_to_graph.pkl`, cached as `data/cache/{dataset}_protein_graphs.pt`.
+Residue-level protein graph derived from kinase-related domain(s) in `data/{dataset}/{dataset}_protein_to_graph.pkl`, cached as `data/cache/{dataset}_protein_graphs.pt`.
 
 Each protein entry:
 
@@ -191,7 +200,7 @@ pip install fair-esm
 ```
 
 ```bash
-python preprocessing/build_pocket_graph.py --dataset davis
+python preprocessing/build_protein_graph.py --dataset davis
 ```
 
 Creates `data/cache/{dataset}_protein_graphs.pt`. The script maps CSV target keys to legacy `.pkl` keys with fallback resolution (e.g., `ABL1(F317I)p` → `ABL1(F317I)-phosphorylated`).
@@ -234,6 +243,7 @@ bash scripts/unseen_pair.sh
 | `--lr`              | 1e-4     | Learning rate (Adam)             |
 | `--patience`        | 30       | Early stopping patience          |
 | `--drug_graph_type` | `atom` | `atom`, `motif`, or `dual` |
+| `--atom_motif_mode` | `none` | `none` or `bottom_up`; `bottom_up` requires `dual` |
 
 Optimizer: `torch.optim.Adam(model.parameters(), lr=args.lr)`. Loss: `nn.MSELoss`.
 
@@ -262,11 +272,11 @@ HierDTA/
 ├── models/
 │   ├── __init__.py                       # Module exports
 │   ├── dta_model.py                      # DTAModel, FusionHead, GatedDrugFusion, DTABatch, collate
-│   └── encoder.py                        # AtomGNN (GATv2Conv), PocketGraphEncoder (GINConv)
+│   └── encoder.py                        # AtomGNN (GATv2Conv), ProteinGraphEncoder (GINConv)
 │
 ├── preprocessing/
 │   ├── create_drug_data.py               # Drug feature cache builder (ECFP4 + hetero graph)
-│   ├── build_pocket_graph.py             # Protein graph cache builder (ESM-2 global embedding)
+│   ├── build_protein_graph.py            # Protein graph cache builder (ESM-2 global embedding)
 │   ├── chemutils.py                      # HimGNN heterogeneous molecular graph construction
 │   ├── cold_split.py                     # Train/valid/test split generation (4 strategies)
 │   ├── download_metz_alphafold.py        # AlphaFold structure downloader (Metz dataset)

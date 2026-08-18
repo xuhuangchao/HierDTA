@@ -1,0 +1,305 @@
+build_metz_protein_to_graph.py 算法说明
+
+一、脚本用途
+
+该脚本用于将 Metz 数据集中的蛋白 kinase domain PDB 文件转换为 residue-level protein graph，并保存为：
+
+data/metz/metz_protein_to_graph.pkl
+data/metz/metz_protein_graph_stats.csv
+
+pkl 中每个蛋白的格式为：
+
+protein_graph[prot_id] = [node_features, edge_index, edge_attr]
+
+其中：
+
+node_features: [N, 41]
+edge_index:    [E, 2]
+edge_attr:     [E, 10]
+
+N 是残基数量，E 是有向边数量。
+
+
+二、输入文件
+
+默认输入：
+
+data/metz/metz_prots.csv
+data/metz/prot_3D_for_Metz/kinase_domains/{prot_id}_domain.pdb
+data/descriptors/aa_phy7.txt
+data/descriptors/BLOSUM62_dim23.txt
+
+metz_prots.csv 可以使用以下任意一种蛋白 ID 列：
+
+prot_id
+target_key
+
+
+三、节点特征：41 维
+
+每个残基作为一个节点。节点特征顺序如下：
+
+0      SASA z-score
+1      phi / 180
+2      psi / 180
+3-8    DSSP secondary structure one-hot: H, B, E, G, T, S
+9-15   AAPHY7 residue descriptor
+16-38  BLOSUM62 23-dimensional descriptor
+39     phosphorylated flag，默认 0
+40     mutated flag，默认 0
+
+具体计算方式：
+
+1. SASA
+
+使用 Biopython ShrakeRupley 在 residue level 计算 solvent-accessible surface area。
+
+当前使用单蛋白内部 z-score：
+
+sasa_scaled = (raw_sasa - raw_sasa.mean()) / raw_sasa.std()
+
+也就是说，每个蛋白的 SASA 均值约为 0，标准差约为 1。
+
+2. phi / psi / secondary structure
+
+使用 DSSP 计算。
+
+DSSP 中 phi 或 psi 如果是 NA 或 360 度哨兵值，则置为 0。
+其他角度除以 180。
+
+二级结构只保留 6 类 one-hot：
+
+H: alpha helix
+B: isolated beta-bridge residue
+E: strand
+G: 3-10 helix
+T: turn
+S: bend
+
+其他 DSSP 标记对应全 0。
+
+3. AAPHY7 和 BLOSUM62
+
+AAPHY7 来自：
+
+data/descriptors/aa_phy7.txt
+
+BLOSUM62 23 维描述符来自：
+
+data/descriptors/BLOSUM62_dim23.txt
+
+这两部分是静态氨基酸描述符，只依赖残基种类，不依赖具体 PDB 构象。
+
+4. phosphorylated / mutated
+
+当前默认均为 0。
+
+如果后续有显式标注文件，可以通过 --protein_flags_csv 指定。
+文件需要包含列：
+
+prot_id,phosphorylated,mutated
+
+
+四、边特征：10 维
+
+边是有向边。每条边的 edge_attr 顺序如下：
+
+0 covalent
+1 hydrophobic contact
+2 hydrogen bond: donor -> acceptor
+3 hydrogen bond: acceptor -> donor
+4 salt bridge: cation -> anion
+5 salt bridge: anion -> cation
+6 cation-pi: aromatic -> cation
+7 cation-pi: cation -> aromatic
+8 parallel pi-stacking
+9 perpendicular pi-stacking
+
+如果某个 residue pair 的 10 维特征全为 0，则不加入边。
+
+
+五、边特征主要计算方法
+
+脚本使用 ODDT/OpenBabel 计算残基间非共价相互作用。
+
+每个 residue 会被单独写成一个 PDB block，然后用 ODDT 读取成一个 molecule。
+这对应文献中 “considering each residue as separate molecule” 的做法。
+
+使用的 ODDT 函数：
+
+hydrophobic contact:
+oddt.interactions.hydrophobic_contacts(cutoff=4)
+
+hydrogen bond:
+oddt.interactions.hbond_acceptor_donor(cutoff=3.5)
+
+salt bridge:
+oddt.interactions.salt_bridge_plus_minus(cutoff=4)
+
+cation-pi:
+oddt.interactions.pi_cation(cutoff=5)
+
+pi-stacking:
+oddt.interactions.pi_stacking(cutoff=5)
+
+
+六、ODDT 单残基 molecule 的修补
+
+ODDT/OpenBabel 在读取单残基 PDB block 时会丢失一部分 residue context，例如：
+
+resname
+resnum
+isbackbone
+isplus
+isminus
+
+因此脚本会在 residue_to_oddt_mol 后调用 patch_oddt_residue_context 进行修补。
+
+修补规则：
+
+1. resname / resnum
+
+使用 Biopython residue 中的残基名和残基编号写回 ODDT atom_dict。
+
+2. isbackbone
+
+N, CA, C, O, OXT 标记为 backbone。
+
+3. isplus
+
+只把以下侧链原子标记为正电：
+
+LYS: NZ
+ARG: NE, NH1, NH2
+HIS: ND1, NE2
+
+这样可以避免 detached residue 的 backbone N 被 ODDT 误标为正电。
+
+4. isminus
+
+只把以下侧链原子标记为负电：
+
+ASP: OD1, OD2
+GLU: OE1, OE2
+
+这是必要的，因为 AlphaFold/PDB 通常没有氢，ODDT 0.7 的 OpenBabel backend 对无氢 ASP/GLU 不会自动设置 isminus。
+
+
+七、salt bridge fallback
+
+salt bridge 首先使用：
+
+oddt.interactions.salt_bridge_plus_minus
+
+如果 ODDT 没有识别到，则使用 residue-level fallback：
+
+正电残基: LYS, ARG, HIS
+负电残基: ASP, GLU
+正负电侧链原子最小距离 <= 4 Å
+
+fallback 的目的是避免无氢 PDB 中 ASP/GLU 的负电状态被漏掉。
+
+
+八、cation-pi 门控
+
+ODDT 单残基 molecule 可能产生 backbone N 相关的假阳性。
+
+因此 cation-pi 额外要求 residue 类型满足：
+
+aromatic residue -> cationic residue
+
+aromatic:
+PHE, TYR, TRP, HIS
+
+cationic:
+LYS, ARG, HIS
+
+只有满足残基类型门控，且 ODDT pi_cation strict flag 为 True，才标记 cation-pi。
+
+
+九、候选边加速
+
+原始全量计算需要遍历所有有向 residue pair：
+
+N * (N - 1)
+
+这会非常慢。
+
+当前脚本先用 heavy atom 坐标和 scipy.spatial.cKDTree 筛选候选 residue pair。
+
+候选距离阈值：
+
+7 Å
+
+选择 7 Å 是为了覆盖所有真实相互作用 cutoff：
+
+hydrophobic: 4 Å
+hbond:       3.5 Å
+salt bridge: 4 Å
+cation-pi:   5 Å
+pi-stacking: 5 Å
+
+同时保守留出余量，避免因为 ring centroid 等几何定义漏掉候选。
+
+同链相邻残基会强制加入候选 pair，用于 covalent edge。
+
+AKT1 验证中：
+
+全量 directed pairs: 66822
+候选 directed pairs: 4566
+
+最终 edge_index / edge_attr 与全量计算完全一致。
+
+
+十、PDB 和 SASA 缓存
+
+脚本会先调用 load_protein_records 读取所有蛋白 domain PDB，并缓存：
+
+pdb_path
+structure
+model
+residues
+raw_sasa
+
+这样后续构图时不需要重复读取 PDB，也不需要重复计算 raw SASA。
+
+DSSP 仍然需要 PDB 文件路径，因此每个蛋白构图时仍会调用 DSSP。
+
+
+十一、运行方式
+
+默认运行：
+
+python preprocessing/build_metz_protein_to_graph.py
+
+如果已有输出文件，默认会跳过已经完成的蛋白。
+
+强制重新生成：
+
+python preprocessing/build_metz_protein_to_graph.py --overwrite
+
+如果 DSSP 命令不是 mkdssp，可以指定：
+
+python preprocessing/build_metz_protein_to_graph.py --dssp_exe dssp
+
+
+十二、注意事项
+
+1. 当前生成逻辑与 Davis/KIBA 商业 pkl 的 schema 对齐：
+
+node_features: 41 维
+edge_attr: 10 维
+
+但不保证 bitwise 完全一致。
+
+2. 差异来源可能包括：
+
+PDB/AlphaFold 版本不同
+domain 截取边界不同
+DSSP 版本不同
+SASA 实现不同
+ODDT/OpenBabel 对单残基 molecule 的化学感知差异
+商业 pkl 的原始构图细节未知
+
+3. 当前算法更强调可复现性和规则清晰性。
+

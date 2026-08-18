@@ -42,6 +42,13 @@ def parse_args():
     parser.add_argument('--drug_graph_type', type=str, default='atom', choices=['atom', 'motif', 'dual'],
                         help='Drug graph branch to encode')
     parser.add_argument(
+        '--atom_motif_mode',
+        type=str,
+        default='none',
+        choices=['none', 'bottom_up'],
+        help='Optional explicit atom-to-motif bottom-up message passing; requires dual drug graphs',
+    )
+    parser.add_argument(
         '--graph_pool_type',
         type=str,
         default='mean_add_max',
@@ -49,7 +56,7 @@ def parse_args():
             'mean', 'add', 'max',
             'mean_add', 'mean_max', 'add_max', 'mean_add_max',
         ],
-        help='Graph readout shared by atom, motif, and pocket encoders; add means sum pooling',
+        help='Graph readout shared by atom, motif, and protein encoders; add means sum pooling',
     )
     parser.add_argument(
         '--modality_ablation',
@@ -65,7 +72,7 @@ def parse_args():
     parser.add_argument('--patience', type=int, default=30, help='Early stopping patience')
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     parser.add_argument('--log_interval', type=int, default=20, help='Training log interval')
-    parser.add_argument('--run_name', type=str, default='avg_am2pocket_sharedq', help='Output filename suffix')
+    parser.add_argument('--run_name', type=str, default='avg_am2protein_sharedq', help='Output filename suffix')
 
     return parser.parse_args()
 
@@ -91,7 +98,7 @@ def read_split_csv(args, dataset, split):
     return list(df['compound_iso_smiles']), list(df['target_key']), list(df['affinity'])
 
 
-def build_dataset(args, dataset, split, drug_features, pocket_features):
+def build_dataset(args, dataset, split, drug_features, protein_features):
     drugs, prots, labels = read_split_csv(args, dataset, split)
     return TestbedDatasetHMol(
         xd=drugs,
@@ -100,7 +107,7 @@ def build_dataset(args, dataset, split, drug_features, pocket_features):
         dataset_name=dataset,
         cache_dir=args.cache_dir,
         drug_features=drug_features,
-        pocket_features=pocket_features,
+        protein_features=protein_features,
     )
 
 
@@ -193,20 +200,24 @@ def main():
     print(f'Strategy: {args.strategy}, seed: {args.seed}')
     print(f'Device: {device}')
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
-    print(f'Graph pooling: {args.graph_pool_type}, modality ablation: {args.modality_ablation}')
+    print(
+        f'Graph pooling: {args.graph_pool_type}, atom-motif mode: {args.atom_motif_mode}, '
+        f'modality ablation: {args.modality_ablation}'
+    )
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = DTAModel(
         drug_graph_type=args.drug_graph_type,
         graph_pool_type=args.graph_pool_type,
+        atom_motif_mode=args.atom_motif_mode,
         modality_ablation=args.modality_ablation,
     ).to(device)
     print('Parameter counts:', model.count_parameters())
 
-    drug_features, pocket_features = load_global_features(dataset, args.cache_dir)
-    train_data = build_dataset(args, dataset, 'train', drug_features, pocket_features)
-    val_data = build_dataset(args, dataset, 'valid', drug_features, pocket_features)
-    test_data = build_dataset(args, dataset, 'test', drug_features, pocket_features)
+    drug_features, protein_features = load_global_features(dataset, args.cache_dir)
+    train_data = build_dataset(args, dataset, 'train', drug_features, protein_features)
+    val_data = build_dataset(args, dataset, 'valid', drug_features, protein_features)
+    test_data = build_dataset(args, dataset, 'test', drug_features, protein_features)
 
     train_loader = build_loader(train_data, args, shuffle=True)
     val_loader = build_loader(val_data, args, shuffle=False)

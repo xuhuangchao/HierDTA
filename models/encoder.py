@@ -1,4 +1,4 @@
-"""Drug and pocket-residue encoders for DTAModel."""
+"""Drug and protein-residue encoders for DTAModel."""
 
 import torch
 import torch.nn as nn
@@ -22,6 +22,8 @@ class AtomGNN(nn.Module):
         edge_key=("atom", "bond", "atom"),
     ):
         super().__init__()
+        self.in_dim = in_dim
+        self.heads = heads
         self.node_key = node_key
         self.edge_key = edge_key
         self.graph_pool_type = graph_pool_type
@@ -69,23 +71,39 @@ class AtomGNN(nn.Module):
                 raise ValueError(f"Unsupported graph_pool_type component: {pool_name}")
         return pooled[0] if len(pooled) == 1 else torch.cat(pooled, dim=-1)
 
-    def forward(self, data):
-        x = data[self.node_key].x
-        batch = data[self.node_key].batch
+    @property
+    def node_out_dim(self):
+        """Width of the node embeddings produced by the final GATv2 layer."""
+        return self.in_dim * self.heads
+
+    def encode_nodes(self, data, x_override=None):
+        """Encode nodes without graph-level pooling.
+
+        ``x_override`` allows the motif branch to consume node features updated
+        by an explicit atom-to-motif message-passing module.
+        """
+        x = data[self.node_key].x if x_override is None else x_override
         edge_index = data[self.edge_key].edge_index
         edge_attr = data[self.edge_key].edge_attr
         for conv in self.convs:
             x = self.activation(conv(x, edge_index, edge_attr=edge_attr))
+        return x
 
-        return self.graph_proj(self._pool(x, batch, self.graph_pool_type))
+    def readout(self, node_h, batch):
+        """Pool node embeddings and project them to a graph representation."""
+        return self.graph_proj(self._pool(node_h, batch, self.graph_pool_type))
+
+    def forward(self, data, x_override=None):
+        node_h = self.encode_nodes(data, x_override=x_override)
+        return self.readout(node_h, data[self.node_key].batch)
 
 
-class PocketGraphEncoder(nn.Module):
+class ProteinGraphEncoder(nn.Module):
     """Protein graph encoder with GIN message passing."""
 
     def __init__(
         self,
-        pocket_in_dim=41,
+        protein_in_dim=41,
         hidden_dim=256,
         num_layers=1,
         graph_pool_type="mean_add_max",
@@ -96,7 +114,7 @@ class PocketGraphEncoder(nn.Module):
         self.graph_pool_type = graph_pool_type
         self.convs = nn.ModuleList()
         for layer_idx in range(num_layers):
-            in_dim = pocket_in_dim if layer_idx == 0 else hidden_dim
+            in_dim = protein_in_dim if layer_idx == 0 else hidden_dim
             self.convs.append(
                 GINConv(
                     nn.Sequential(
