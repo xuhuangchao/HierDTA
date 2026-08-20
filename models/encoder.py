@@ -25,10 +25,13 @@ class AtomGNN(nn.Module):
         graph_pool_type="mean_add_max",
         graph_out_dim=1024,
         post_dropout=0.3,
+        build_graph_head=True,
         node_key="atom",
         edge_key=("atom", "bond", "atom"),
     ):
         super().__init__()
+        if num_layers < 1:
+            raise ValueError("AtomGNN requires num_layers >= 1")
         self.in_dim = in_dim
         self.heads = heads
         self.node_key = node_key
@@ -51,13 +54,15 @@ class AtomGNN(nn.Module):
             layer_in = in_dim * heads
         self.activation = nn.ReLU()
 
-        conv_out_dim = in_dim * heads
-        pooled_dim = self._pooled_dim(conv_out_dim, graph_pool_type)
-        self.graph_proj = nn.Sequential(
-            nn.Linear(pooled_dim, graph_out_dim),
-            nn.ReLU(),
-            nn.Dropout(post_dropout),
-        )
+        self.graph_proj = None
+        if build_graph_head:
+            conv_out_dim = in_dim * heads
+            pooled_dim = self._pooled_dim(conv_out_dim, graph_pool_type)
+            self.graph_proj = nn.Sequential(
+                nn.Linear(pooled_dim, graph_out_dim),
+                nn.ReLU(),
+                nn.Dropout(post_dropout),
+            )
 
     @staticmethod
     def _pooled_dim(hidden_dim, pool_type):
@@ -98,6 +103,8 @@ class AtomGNN(nn.Module):
 
     def readout(self, node_h, batch):
         """Pool node embeddings and project them to a graph representation."""
+        if self.graph_proj is None:
+            raise RuntimeError("Graph readout was disabled with build_graph_head=False")
         return self.graph_proj(self._pool(node_h, batch, self.graph_pool_type))
 
     def forward(self, data, x_override=None):
@@ -125,6 +132,7 @@ class ProteinGraphEncoder(nn.Module):
         post_dropout=0.3,
         protein_edge_dim=10,
         protein_graph_mode="cov",
+        build_graph_head=True,
     ):
         super().__init__()
         valid_modes = {"cov", "noncov", "dual_view"}
@@ -182,12 +190,17 @@ class ProteinGraphEncoder(nn.Module):
             )
 
         self.activation = nn.ReLU()
-        self.graph_proj = nn.Sequential(
-            nn.Linear(AtomGNN._pooled_dim(hidden_dim, graph_pool_type), graph_out_dim),
-            nn.BatchNorm1d(graph_out_dim),
-            nn.ReLU(),
-            nn.Dropout(post_dropout),
-        )
+        self.graph_proj = None
+        if build_graph_head:
+            self.graph_proj = nn.Sequential(
+                nn.Linear(
+                    AtomGNN._pooled_dim(hidden_dim, graph_pool_type),
+                    graph_out_dim,
+                ),
+                nn.BatchNorm1d(graph_out_dim),
+                nn.ReLU(),
+                nn.Dropout(post_dropout),
+            )
 
     @staticmethod
     def _build_convs(
@@ -250,7 +263,8 @@ class ProteinGraphEncoder(nn.Module):
             x = self.activation(conv(x, edge_index, edge_attr=edge_attr))
         return x
 
-    def forward(self, x, edge_index, batch, edge_attr=None):
+    def encode_nodes(self, x, edge_index, edge_attr=None):
+        """Return edge-type-aware residue embeddings before graph pooling."""
         cov_edge_index, noncov_edge_index, noncov_edge_attr = (
             self._split_edges(edge_index, edge_attr)
         )
@@ -278,5 +292,15 @@ class ProteinGraphEncoder(nn.Module):
             )
             x = self.node_fusion(torch.cat([cov_x, noncov_x], dim=-1))
 
-        pooled = AtomGNN._pool(x, batch, self.graph_pool_type)
+        return x
+
+    def readout(self, node_h, batch):
+        """Pool residue embeddings and project them to a graph representation."""
+        if self.graph_proj is None:
+            raise RuntimeError("Graph readout was disabled with build_graph_head=False")
+        pooled = AtomGNN._pool(node_h, batch, self.graph_pool_type)
         return self.graph_proj(pooled)
+
+    def forward(self, x, edge_index, batch, edge_attr=None):
+        node_h = self.encode_nodes(x, edge_index, edge_attr=edge_attr)
+        return self.readout(node_h, batch)

@@ -1,12 +1,13 @@
 """Top-level DTA model and custom batching for nested PyG graph objects."""
 
-from typing import Any, List, Optional
+from typing import Any, List
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from torch_geometric.data import Batch, Data, HeteroData
 
+from .cross_attention import MultiScaleDrugResidueAttention
 from .encoder import AtomGNN, ProteinGraphEncoder
 from .interaction import BottomUpAtomMotifFusion
 
@@ -54,32 +55,6 @@ def dta_collate_fn(data_list: List[Any]) -> DTABatch:
     )
 
 
-class GatedDrugFusion(nn.Module):
-    """Per-sample, per-dimension gated fusion of atom-level and motif-level drug
-    graph representations.
-
-    Given atom_vec [B, D] and motif_vec [B, D], a gate network produces a
-    sigmoid mask g ∈ [0,1]^D that soft-selects between the two sources per
-    dimension.  The fused output retains dimension D so that downstream
-    FusionHead requires no structural change.
-    """
-
-    def __init__(self, atom_dim: int = 1024, motif_dim: int = 1024, fused_dim: int = 1024):
-        super().__init__()
-        self.atom_proj = nn.Linear(atom_dim, fused_dim)
-        self.motif_proj = nn.Linear(motif_dim, fused_dim)
-        self.gate = nn.Sequential(
-            nn.Linear(atom_dim + motif_dim, fused_dim),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, atom_vec: Tensor, motif_vec: Tensor) -> Tensor:
-        atom_h = self.atom_proj(atom_vec)     # [B, fused_dim]
-        motif_h = self.motif_proj(motif_vec)  # [B, fused_dim]
-        g = self.gate(torch.cat([atom_vec, motif_vec], dim=-1))  # [B, fused_dim]
-        return g * atom_h + (1.0 - g) * motif_h
-
-
 class FinalFCLayers(nn.Module):
     def __init__(
         self,
@@ -109,12 +84,11 @@ class FinalFCLayers(nn.Module):
 
 
 class FusionHead(nn.Module):
-    """Pooled atom/protein/global feature fusion head."""
+    """Fuse one structural representation with global descriptors."""
 
     def __init__(
         self,
-        drug_graph_dim: int = 1024,
-        protein_graph_dim: int = 1024,
+        structural_dim: int = 1024,
         fp_dim: int = 2048,
         fp_out_dim: int = 256,
         esm_in_dim: int = 1280,
@@ -142,11 +116,7 @@ class FusionHead(nn.Module):
                 nn.Dropout(dropout),
             )
 
-        fusion_dim = 0
-        if modality_ablation != "drug_graph":
-            fusion_dim += drug_graph_dim
-        if modality_ablation != "protein_graph":
-            fusion_dim += protein_graph_dim
+        fusion_dim = structural_dim
         if self.fp_proj is not None:
             fusion_dim += fp_out_dim
         if self.esm_global_proj is not None:
@@ -155,20 +125,11 @@ class FusionHead(nn.Module):
 
     def forward(
         self,
-        atom_graph: Optional[Tensor],
-        protein_graph: Optional[Tensor],
+        structural_repr: Tensor,
         fingerprint: Tensor,
         esm_global: Tensor,
     ) -> Tensor:
-        fusion_inputs = []
-        if self.modality_ablation != "drug_graph":
-            if atom_graph is None:
-                raise ValueError("atom_graph is required unless drug_graph is ablated")
-            fusion_inputs.append(atom_graph)
-        if self.modality_ablation != "protein_graph":
-            if protein_graph is None:
-                raise ValueError("protein_graph is required unless protein_graph is ablated")
-            fusion_inputs.append(protein_graph)
+        fusion_inputs = [structural_repr]
         if self.fp_proj is not None:
             fusion_inputs.append(self.fp_proj(fingerprint))
         if self.esm_global_proj is not None:
@@ -178,7 +139,7 @@ class FusionHead(nn.Module):
 
 
 class DTAModel(nn.Module):
-    """DTA model: pooled drug GNN + pooled protein GIN fusion."""
+    """Hierarchical DTA model with fine-grained drug-residue interaction."""
 
     def __init__(
         self,
@@ -190,108 +151,86 @@ class DTAModel(nn.Module):
         protein_in_dim: int = 41,
         protein_num_layers: int = 1,
         protein_hidden_dim: int = 256,
-        protein_graph_out_dim: int = 1024,
         atom_num_layers: int = 1,
         motif_num_layers: int = 1,
-        drug_graph_out_dim: int = 1024,
         graph_pool_type: str = "mean_add_max",
+        embed_dim: int = 256,
+        num_heads: int = 8,
         modality_ablation: str = "none",
         fp_dim: int = 2048,
         fp_out_dim: int = 256,
         esm_in_dim: int = 1280,
         esm_out_dim: int = 256,
         dropout: float = 0.5,
-        atom_motif_mode: str = "none",
         protein_graph_mode: str = "cov",
     ):
         super().__init__()
         if drug_graph_type not in ("atom", "motif", "dual"):
             raise ValueError("drug_graph_type must be 'atom', 'motif', or 'dual'")
-        if atom_motif_mode not in ("none", "bottom_up"):
-            raise ValueError("atom_motif_mode must be 'none' or 'bottom_up'")
-        if atom_motif_mode == "bottom_up" and drug_graph_type != "dual":
-            raise ValueError("atom_motif_mode='bottom_up' requires drug_graph_type='dual'")
         if protein_graph_mode not in ("cov", "noncov", "dual_view"):
             raise ValueError(
                 "protein_graph_mode must be 'cov', 'noncov', or 'dual_view'"
             )
-        valid_ablations = {
-            "none", "drug_fingerprint", "drug_graph", "protein_graph", "protein_seq"
-        }
+        valid_ablations = {"none", "drug_fingerprint", "protein_seq"}
         if modality_ablation not in valid_ablations:
             raise ValueError(
                 f"modality_ablation must be one of {sorted(valid_ablations)}"
             )
 
         self.drug_graph_type = drug_graph_type
-        self.atom_motif_mode = atom_motif_mode
         self.protein_graph_mode = protein_graph_mode
         self.modality_ablation = modality_ablation
 
         # ── drug encoder(s) ──────────────────────────────────────────
-        if modality_ablation != "drug_graph" and drug_graph_type in ("atom", "dual"):
-            self.atom_encoder = AtomGNN(
-                in_dim=atom_in_dim,
-                edge_dim=atom_edge_dim,
-                num_layers=atom_num_layers,
-                graph_pool_type=graph_pool_type,
-                graph_out_dim=drug_graph_out_dim,
-                node_key="atom",
-                edge_key=("atom", "bond", "atom"),
-            )
-        else:
-            self.atom_encoder = None
+        self.atom_encoder = AtomGNN(
+            in_dim=atom_in_dim,
+            edge_dim=atom_edge_dim,
+            num_layers=atom_num_layers,
+            graph_pool_type=graph_pool_type,
+            build_graph_head=False,
+            node_key="atom",
+            edge_key=("atom", "bond", "atom"),
+        )
 
-        if modality_ablation != "drug_graph" and drug_graph_type in ("motif", "dual"):
-            self.motif_encoder = AtomGNN(
-                in_dim=motif_in_dim,
-                edge_dim=motif_edge_dim,
-                num_layers=motif_num_layers,
-                graph_pool_type=graph_pool_type,
-                graph_out_dim=drug_graph_out_dim,
-                node_key="motif",
-                edge_key=("motif", "connects", "motif"),
-            )
-        else:
-            self.motif_encoder = None
+        self.motif_encoder = AtomGNN(
+            in_dim=motif_in_dim,
+            edge_dim=motif_edge_dim,
+            num_layers=motif_num_layers,
+            graph_pool_type=graph_pool_type,
+            build_graph_head=False,
+            node_key="motif",
+            edge_key=("motif", "connects", "motif"),
+        )
 
-        self.atom_motif_fusion = None
-        if (
-            modality_ablation != "drug_graph"
-            and drug_graph_type == "dual"
-            and atom_motif_mode == "bottom_up"
-        ):
-            self.atom_motif_fusion = BottomUpAtomMotifFusion(
-                atom_dim=self.atom_encoder.node_out_dim,
-                motif_dim=motif_in_dim,
-            )
-
-        if modality_ablation != "drug_graph" and drug_graph_type == "dual":
-            self.drug_fusion = GatedDrugFusion(
-                atom_dim=drug_graph_out_dim,
-                motif_dim=drug_graph_out_dim,
-                fused_dim=drug_graph_out_dim,
-            )
-        else:
-            self.drug_fusion = None
+        self.atom_motif_fusion = BottomUpAtomMotifFusion(
+            atom_dim=self.atom_encoder.node_out_dim,
+            motif_dim=motif_in_dim,
+        )
 
         # ── protein encoder ──────────────────────────────────────────
-        self.protein_encoder = None
-        if modality_ablation != "protein_graph":
-            self.protein_encoder = ProteinGraphEncoder(
-                protein_in_dim=protein_in_dim,
-                hidden_dim=protein_hidden_dim,
-                num_layers=protein_num_layers,
-                graph_pool_type=graph_pool_type,
-                graph_out_dim=protein_graph_out_dim,
-                protein_edge_dim=10,
-                protein_graph_mode=protein_graph_mode,
-            )
+        self.protein_encoder = ProteinGraphEncoder(
+            protein_in_dim=protein_in_dim,
+            hidden_dim=protein_hidden_dim,
+            num_layers=protein_num_layers,
+            graph_pool_type=graph_pool_type,
+            graph_out_dim=1024,
+            protein_edge_dim=10,
+            protein_graph_mode=protein_graph_mode,
+            build_graph_head=True,
+        )
+
+        self.cross_attention = MultiScaleDrugResidueAttention(
+            atom_dim=self.atom_encoder.node_out_dim,
+            motif_dim=self.motif_encoder.node_out_dim,
+            protein_dim=protein_hidden_dim,
+            embed_dim=embed_dim,
+            num_heads=num_heads,
+            out_dim=1024,
+        )
 
         # ── fusion head (input dimension follows the retained modalities) ───
         self.fusion_head = FusionHead(
-            drug_graph_dim=drug_graph_out_dim,
-            protein_graph_dim=protein_graph_out_dim,
+            structural_dim=2048,
             fp_dim=fp_dim,
             fp_out_dim=fp_out_dim,
             esm_in_dim=esm_in_dim,
@@ -300,55 +239,52 @@ class DTAModel(nn.Module):
             modality_ablation=modality_ablation,
         )
 
-    def forward(self, data: DTABatch) -> Tensor:
-        drug_graph = None
-        if self.modality_ablation != "drug_graph":
-            if self.drug_graph_type == "dual":
-                if self.atom_motif_mode == "bottom_up":
-                    atom_h = self.atom_encoder.encode_nodes(data.hetero)
-                    motif_x = self.atom_motif_fusion(
-                        atom_h=atom_h,
-                        motif_x=data.hetero["motif"].x,
-                        membership_edge_index=data.hetero[
-                            "atom", "in", "motif"
-                        ].edge_index,
-                    )
-                    motif_h = self.motif_encoder.encode_nodes(
-                        data.hetero,
-                        x_override=motif_x,
-                    )
-                    atom_graph = self.atom_encoder.readout(
-                        atom_h,
-                        data.hetero["atom"].batch,
-                    )
-                    motif_graph = self.motif_encoder.readout(
-                        motif_h,
-                        data.hetero["motif"].batch,
-                    )
-                else:
-                    atom_graph = self.atom_encoder(data.hetero)
-                    motif_graph = self.motif_encoder(data.hetero)
-                drug_graph = self.drug_fusion(atom_graph, motif_graph)
-            elif self.drug_graph_type == "motif":
-                drug_graph = self.motif_encoder(data.hetero)
-            else:
-                drug_graph = self.atom_encoder(data.hetero)
+    def forward(self, data: DTABatch, return_attention: bool = False):
+        atom_h = self.atom_encoder.encode_nodes(data.hetero)
+        motif_x = self.atom_motif_fusion(
+            atom_h=atom_h,
+            motif_x=data.hetero["motif"].x,
+            membership_edge_index=data.hetero[
+                "atom", "in", "motif"
+            ].edge_index,
+        )
+        motif_h = self.motif_encoder.encode_nodes(
+            data.hetero,
+            x_override=motif_x,
+        )
+        protein_h = self.protein_encoder.encode_nodes(
+            data.protein_graph.x,
+            data.protein_graph.edge_index,
+            data.protein_graph.edge_attr,
+        )
 
-        protein_graph = None
-        if self.modality_ablation != "protein_graph":
-            protein_graph = self.protein_encoder(
-                data.protein_graph.x,
-                data.protein_graph.edge_index,
-                data.protein_graph.batch,
-                data.protein_graph.edge_attr,
-            )
+        cross_repr, attention_info = self.cross_attention(
+            atom_h=atom_h,
+            atom_batch=data.hetero["atom"].batch,
+            motif_h=motif_h,
+            motif_batch=data.hetero["motif"].batch,
+            protein_h=protein_h,
+            protein_batch=data.protein_graph.batch,
+            drug_graph_type=self.drug_graph_type,
+            return_attention=return_attention,
+        )
+        protein_graph_repr = self.protein_encoder.readout(
+            protein_h,
+            data.protein_graph.batch,
+        )
+        structural_repr = torch.cat(
+            [cross_repr, protein_graph_repr],
+            dim=-1,
+        )
 
-        return self.fusion_head(
-            atom_graph=drug_graph,
-            protein_graph=protein_graph,
+        prediction = self.fusion_head(
+            structural_repr=structural_repr,
             fingerprint=data.fingerprint,
             esm_global=data.esm_global,
         )
+        if return_attention:
+            return prediction, attention_info
+        return prediction
 
     def count_parameters(self) -> dict:
         def count(module):
@@ -366,14 +302,12 @@ class DTAModel(nn.Module):
         print("── motif_encoder ──")
         if self.motif_encoder is not None:
             print(self.motif_encoder)
-        print("── drug_fusion ──")
-        if self.drug_fusion is not None:
-            print(self.drug_fusion)
         print("── atom_motif_fusion ──")
-        if self.atom_motif_fusion is not None:
-            print(self.atom_motif_fusion)
+        print(self.atom_motif_fusion)
         print("── protein_encoder ──")
         print(self.protein_encoder)
+        print("── cross_attention ──")
+        print(self.cross_attention)
         print("── fusion_head ──")
         print(self.fusion_head)
 

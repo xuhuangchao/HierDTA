@@ -1,11 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 
-# Four input-modality ablations x five Davis warm split seeds = 20 runs.
+# Two global-modality ablations x five Davis warm split seeds = 10 runs.
 for ablation in \
   drug_fingerprint \
-  drug_graph \
-  protein_graph \
   protein_seq
 do
   for seed in 41 42 43 32 33

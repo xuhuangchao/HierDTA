@@ -5,22 +5,19 @@ Hierarchical Drug-Target Affinity prediction model that jointly encodes atom-lev
 ## 🏗️ Architecture Overview
 
 ```
-                    ┌──────────────────────────────┐
-                    │       Drug Encoder(s)         │
-                    │                               │
-  data.hetero ──────┤  atom:  GATv2Conv on [N, 37] │──► drug_graph [B, 1024]
-                    │  motif: GATv2Conv on [M, 50]  │    (or dual → gated fusion)
-                    └──────────────────────────────┘
-                    ┌──────────────────────────────┐
-  data.protein_graph ┤ covalent GIN / noncovalent GINE│──► protein_graph [B, 1024]
-  data.esm_global ──┤  Linear(1280 → 256)           │──► esm_proj  [B,  256]
-  data.fingerprint ─┤  Linear(2048 → 256)           │──► fp_proj   [B,  256]
-                    └──────────────────────────────┘
-                              │
-                    ┌─────────▼──────────┐
-                    │    FusionHead       │
-                    │  cat → MLP → 1      │
-                    └────────────────────┘
+data.hetero: atom GATv2 → atom tokens [N_atom, 74]
+       │ atom→motif membership aggregation
+       └→ motif GATv2 → motif tokens [N_motif, 100]
+
+data.protein_graph → covalent GIN / noncovalent GINE → residue tokens [N_res, 256]
+  ├→ cross-attention Key/Value
+  └→ graph readout → protein graph [B, 1024]
+
+atom + motif tokens (Query) → residue tokens (Key/Value)
+  → multi-head cross-attention → scale-balanced mean pooling → [B, 1024]
+
+cross-attention pool [B, 1024] + protein graph [B, 1024]
+  + fingerprint [B, 256] + ESM-2 [B, 256] → MLP → affinity
 ```
 
 ## 💊 Drug Graph Encoder
@@ -37,20 +34,22 @@ The molecular heterogeneous graph is built by `preprocessing/chemutils.py` via H
 
 ### Drug Graph Modes (`--drug_graph_type`)
 
-| Mode      | Encoders                     | Fusion          | Description                                                             |
-| --------- | ---------------------------- | --------------- | ----------------------------------------------------------------------- |
-| `atom`  | 1× GATv2Conv on atom nodes  | —              | Baseline. Atom-level graph only.                                        |
-| `motif` | 1× GATv2Conv on motif nodes | —              | Motif-level graph only. Functional-group semantics.                     |
-| `dual`  | 2× GATv2Conv (atom + motif) | GatedDrugFusion | Per-dimension sigmoid gate soft-selects between atom and motif signals. |
+All three modes run the same atom encoder, bottom-up atom→motif update,
+motif encoder, protein encoder, and cross-attention. The option changes which
+scale-specific pooled slot is retained, while the downstream width stays fixed.
+
+| Mode | Cross-attention pooling input |
+| ---- | ----------------------------- |
+| `atom` | Atom masked mean `[B,256]` |
+| `motif` | Motif masked mean `[B,256]` |
+| `dual` | `0.5 × (atom_mean + motif_mean)` `[B,256]` |
 
 #### Atom Branch
 
 ```text
 GATv2Conv(37 → 37, heads=2, concat=True, edge_dim=13)
 ReLU
-GraphPool(mean + add + max): [B, 37×2×3] = [B, 222]
-Linear(222 → 1024) → ReLU → Dropout(0.3)
-drug_atom: [B, 1024]
+atom_tokens: [N_atom, 74]
 ```
 
 #### Motif Branch
@@ -58,31 +57,32 @@ drug_atom: [B, 1024]
 ```text
 GATv2Conv(50 → 50, heads=2, concat=True, edge_dim=37)
 ReLU
-GraphPool(mean + add + max): [B, 50×2×3] = [B, 300]
-Linear(300 → 1024) → ReLU → Dropout(0.3)
-drug_motif: [B, 1024]
+motif_tokens: [N_motif, 100]
 ```
 
-#### Gated Drug Fusion (dual mode only)
+#### Multi-scale Drug–Residue Cross-Attention
 
 ```text
-atom_vec [B, 1024] ──► atom_proj [B, 1024] ──┐
-                                               ├── g * atom_h + (1-g) * motif_h → [B, 1024]
-motif_vec [B, 1024] ─► motif_proj [B, 1024] ─┘
-                              ▲
-gate = σ(Linear(cat(atom_vec, motif_vec))) [B, 1024]
+atom tokens  [N_atom,74]  → Linear(74→256)  + atom type embedding ─┐
+motif tokens [N_motif,100] → Linear(100→256) + motif type embedding ├─ Query
+residue tokens [N_res,256] → Linear(256→256) ───────────────────────┴─ Key/Value
+
+MultiheadAttention(embed_dim=256, heads=8, dropout=0.1)
+→ residual + LayerNorm → FFN + residual + LayerNorm
+→ scale-specific masked mean [B,256]
+→ dual: 0.5 × (atom_mean + motif_mean)
+→ Linear(256→1024) → ReLU → Dropout(0.3)
+→ cross-attention pool [B,1024]
 ```
 
-The gate is a per-dimension sigmoid mask learned from the concatenated representations. `g ≈ 1` means the dimension relies on atom signal; `g ≈ 0` means it relies on motif signal. The fused output retains 1024 dimensions so the downstream `FusionHead` is unchanged.
+Attention weights are produced only when `model(data, return_attention=True)`
+is explicitly requested; ordinary training avoids retaining the large matrix.
 
-#### Optional Bottom-Up Atom→Motif Update
+#### Bottom-Up Atom→Motif Update
 
-With `--drug_graph_type dual --atom_motif_mode bottom_up`, atom embeddings
-produced by the atom GATv2 branch are mean-aggregated along the explicit
-`atom-in-motif` membership edges. A gated residual update injects the resulting
-context into the original 50-dimensional motif features before motif-level
-message passing. The default `--atom_motif_mode none` preserves the independent
-dual-branch behavior.
+Atom embeddings are always mean-aggregated along the explicit `atom-in-motif`
+membership edges. A gated residual update injects the resulting context into
+the original 50-dimensional motif features before motif-level message passing.
 
 ## 🧬 Protein Graph Encoder
 
@@ -109,7 +109,7 @@ Protein graph modes (`--protein_graph_mode`):
 | `dual_view` | Both mutually exclusive views above | Covalent GIN + noncovalent GINE | Node concatenation + MLP |
 
 In `dual_view`, corresponding residue embeddings from both branches are
-concatenated and projected from 512 to 256 dimensions before graph pooling:
+concatenated and projected from 512 to 256 dimensions before cross-attention:
 
 ```text
 Residue features [N, 41]
@@ -117,9 +117,11 @@ Residue features [N, 41]
   └── noncovalent GINE ───► [N, 256]
                                   │
                    concat + MLP: [N, 512] → [N, 256]
-GraphPool(mean + add + max): [B, 256×3] = [B, 768]
-Linear(768 → 1024) → BatchNorm1d → ReLU → Dropout(0.3)
-protein_graph: [B, 1024]
+residue_tokens: [N, 256]
+  ├→ cross-attention Key/Value
+  └→ GraphPool(mean + add + max) [B,768]
+     → Linear(768→1024) → BatchNorm1d → ReLU → Dropout(0.3)
+     → protein_graph [B,1024]
 ```
 
 ## 🌐 Global Features
@@ -134,7 +136,9 @@ Long protein sequences are chunked at 1022 residues; chunk embeddings are mean-p
 ## ⚡ Fusion Head
 
 ```text
-concat([drug_graph, prot_graph, fp_proj, esm_proj]): [B, 2560]
+cross_attention_pool: [B, 1024]
+protein_graph: [B, 1024]
+concat([cross_attention_pool, protein_graph, fp_proj, esm_proj]): [B, 2560]
 
 Linear(2560 → 2048) → BatchNorm1d → ReLU → Dropout(0.5)
 Linear(2048 → 1024) → BatchNorm1d → ReLU → Dropout(0.5)
@@ -231,7 +235,7 @@ Single run:
 python train.py --dataset davis --strategy warm --seed 41 --drug_graph_type atom
 ```
 
-Gated dual-fusion run:
+Dual-scale cross-attention run:
 
 ```bash
 python train.py --dataset davis --strategy unseen_drug --seed 41 --drug_graph_type dual
@@ -255,8 +259,13 @@ bash scripts/unseen_pair.sh
 | `--lr`              | 1e-4     | Learning rate (Adam)             |
 | `--patience`        | 30       | Early stopping patience          |
 | `--drug_graph_type` | `atom` | `atom`, `motif`, or `dual` |
-| `--atom_motif_mode` | `none` | `none` or `bottom_up`; `bottom_up` requires `dual` |
-| `--protein_graph_mode` | `cov` | `cov`, `noncov`, or `dual_view` |
+| `--protein_graph_mode` | `dual_view` | `cov`, `noncov`, or `dual_view` |
+| `--atom_layer` | `1` | Number of atom GATv2 layers |
+| `--motif_layer` | `1` | Number of motif GATv2 layers |
+| `--protein_layer` | `1` | Number of protein GIN/GINE layers |
+| `--embed_dim` | `256` | Cross-attention embedding width |
+| `--num_heads` | `8` | Cross-attention heads |
+| `--modality_ablation` | `none` | `none`, `drug_fingerprint`, or `protein_seq` |
 
 Optimizer: `torch.optim.Adam(model.parameters(), lr=args.lr)`. Loss: `nn.MSELoss`.
 
@@ -284,7 +293,8 @@ HierDTA/
 │
 ├── models/
 │   ├── __init__.py                       # Module exports
-│   ├── dta_model.py                      # DTAModel, FusionHead, GatedDrugFusion, DTABatch, collate
+│   ├── dta_model.py                      # DTAModel, FusionHead, DTABatch, collate
+│   ├── cross_attention.py                # Multi-scale drug-residue cross-attention
 │   └── encoder.py                        # AtomGNN (GATv2), ProteinGraphEncoder (GIN/GINE)
 │
 ├── preprocessing/

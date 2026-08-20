@@ -1,8 +1,5 @@
 #!/bin/bash
-set -euo pipefail
-
-# Davis warm-split evaluation for the dual drug encoder with explicit
-# bottom-up atom-to-motif message passing. Runs all five predefined split seeds.
+# Davis warm-split evaluation for dual-scale drug-residue cross-attention.
 for seed in 41 42 43 32 33
 do
   python train.py \
@@ -11,9 +8,12 @@ do
     --strategy warm \
     --seed "${seed}" \
     --drug_graph_type dual \
-    --atom_motif_mode bottom_up \
     --protein_graph_mode dual_view \
-    --graph_pool_type mean_add_max \
-    --run_name bottom_up_dual \
+    --atom_layer 1 \
+    --motif_layer 1 \
+    --protein_layer 1 \
+    --embed_dim 256 \
+    --num_heads 8 \
+    --run_name cross_attn_mean_pgskip \
     "$@"
 done

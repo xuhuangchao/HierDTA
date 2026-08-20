@@ -39,42 +39,20 @@ def parse_args():
     parser.add_argument('--cache_dir', type=str, default='data/cache', help='Global cache directory')
     parser.add_argument('--split_root', type=str, default='data', help='Split csv root')
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
-    parser.add_argument('--drug_graph_type', type=str, default='atom', choices=['atom', 'motif', 'dual'],
-                        help='Drug graph branch to encode')
-    parser.add_argument(
-        '--atom_motif_mode',
-        type=str,
-        default='none',
-        choices=['none', 'bottom_up'],
-        help='Optional explicit atom-to-motif bottom-up message passing; requires dual drug graphs',
-    )
-    parser.add_argument(
-        '--graph_pool_type',
-        type=str,
-        default='mean_add_max',
-        choices=[
-            'mean', 'add', 'max',
-            'mean_add', 'mean_max', 'add_max', 'mean_add_max',
-        ],
-        help='Graph readout shared by atom, motif, and protein encoders; add means sum pooling',
-    )
-    parser.add_argument(
-        '--protein_graph_mode',
-        type=str,
-        default='dual_view',
-        choices=['cov', 'noncov', 'dual_view'],
-        help=(
-            'Protein residue graph encoder: covalent GIN, exclusive '
-            'noncovalent GINE, or their node-concatenated dual view'
-        ),
-    )
-    parser.add_argument(
-        '--modality_ablation',
-        type=str,
-        default='none',
-        choices=['none', 'drug_fingerprint', 'drug_graph', 'protein_graph', 'protein_seq'],
-        help='Remove one modality from the FusionHead concatenated input',
-    )
+    parser.add_argument('--drug_graph_type', type=str, default='atom', choices=['atom', 'motif', 'dual'], help='Select atom, motif, or dual-scale cross-attention pooling')
+    parser.add_argument('--graph_pool_type', type=str, default='mean_add_max',
+                        choices=['mean', 'add', 'max', 'mean_add', 'mean_max', 'add_max', 'mean_add_max'],
+                        help='Legacy graph-readout option (node cross-attention uses fixed mean-max pooling)')
+    parser.add_argument('--protein_graph_mode', type=str, default='dual_view',
+                        choices=['cov', 'noncov', 'dual_view'],
+                        help='Protein graph encoder: covalent GIN, noncovalent GINE, or dual view')
+    parser.add_argument('--atom_layer', type=int, default=1, help='Number of atom GATv2 layers')
+    parser.add_argument('--motif_layer', type=int, default=1, help='Number of motif GATv2 layers')
+    parser.add_argument('--protein_layer', type=int, default=1, help='Number of protein GIN/GINE layers')
+    parser.add_argument('--embed_dim', type=int, default=256, help='Cross-attention embedding dimension')
+    parser.add_argument('--num_heads', type=int, default=8, help='Number of cross-attention heads')
+    parser.add_argument('--modality_ablation', type=str, default='none', choices=['none', 'drug_fingerprint', 'protein_seq'],
+                        help='Optionally remove a global fingerprint or protein-sequence modality')
 
     parser.add_argument('--epochs', type=int, default=500, help='Max training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
@@ -211,17 +189,25 @@ def main():
     print(f'Device: {device}')
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
     print(
-        f'Graph pooling: {args.graph_pool_type}, atom-motif mode: {args.atom_motif_mode}, '
-        f'protein graph mode: {args.protein_graph_mode}, '
+        f'Cross pooling: scale-wise mean-max, protein graph mode: {args.protein_graph_mode}, '
         f'modality ablation: {args.modality_ablation}'
     )
+    print(
+        f'Encoder layers: atom={args.atom_layer}, motif={args.motif_layer}, '
+        f'protein={args.protein_layer}'
+    )
+    print(f'Cross-attention: embed_dim={args.embed_dim}, num_heads={args.num_heads}')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = DTAModel(
         drug_graph_type=args.drug_graph_type,
         graph_pool_type=args.graph_pool_type,
-        atom_motif_mode=args.atom_motif_mode,
         protein_graph_mode=args.protein_graph_mode,
+        atom_num_layers=args.atom_layer,
+        motif_num_layers=args.motif_layer,
+        protein_num_layers=args.protein_layer,
+        embed_dim=args.embed_dim,
+        num_heads=args.num_heads,
         modality_ablation=args.modality_ablation,
     ).to(device)
     print('Parameter counts:', model.count_parameters())
