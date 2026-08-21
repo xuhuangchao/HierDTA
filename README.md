@@ -10,15 +10,17 @@ data.hetero: atom GATv2 → atom tokens [N_atom, 74]
        └→ motif GATv2 → motif tokens [N_motif, 100]
 
 data.protein_graph → covalent GIN / noncovalent GINE → residue tokens [N_res, 256]
-  ├→ cross-attention Key/Value
-  └→ graph readout → protein graph [B, 1024]
+  └→ cross-attention Key/Value
 
 atom/motif tokens (Query) → residue tokens (Key/Value)
-  → cross-attention → scale-specific mean → Linear(256→1024)
-  → cross-attention pool [B, 1024]
+  → cross-attention → separate scale-specific masked means
+  → atom interaction [B, 256] + motif interaction [B, 256]
 
-cross-attention pool [B, 1024] + protein graph [B, 1024]
-  + fingerprint [B, 256] + ESM-2 [B, 256] → MLP → affinity
+ECFP4 [B, 256] + ESM-2 [B, 256]
+  → global encoder (512→512→256) → global interaction [B, 256]
+
+atom [B,256] + motif [B,256] + global [B,256]
+  → FusionHead (768→512→256→1) → affinity
 ```
 
 ## 💊 Drug Graph Encoder
@@ -37,13 +39,14 @@ The molecular heterogeneous graph is built by `preprocessing/chemutils.py` via H
 
 All three modes run the atom encoder, bottom-up atom→motif update, motif
 encoder, protein encoder, and cross-attention. The option changes which
-scale-specific pooled representation is retained before `pool_proj`.
+scale-specific representation is active while preserving the fixed 768-D
+FusionHead input for controlled ablations.
 
-| Mode | Cross-attention pooling input |
-| ---- | ----------------------------- |
-| `atom` | Atom masked mean `[B,256]` |
-| `motif` | Motif masked mean `[B,256]` |
-| `dual` | `0.5 × (atom_mean + motif_mean)` `[B,256]` |
+| Mode | Atom representation | Motif representation |
+| ---- | ------------------- | -------------------- |
+| `atom` | Atom masked mean `[B,256]` | Zeros `[B,256]` |
+| `motif` | Zeros `[B,256]` | Motif masked mean `[B,256]` |
+| `dual` | Atom masked mean `[B,256]` | Motif masked mean `[B,256]` |
 
 #### Atom Branch
 
@@ -70,10 +73,7 @@ residue tokens [N_res,256] → Linear(256→256) ──────────�
 
 MultiheadAttention(embed_dim=256, heads=8, dropout=0.1)
 → residual + LayerNorm → FFN + residual + LayerNorm
-→ scale-specific masked mean [B,256]
-→ dual: 0.5 × (atom_mean + motif_mean)
-→ Linear(256→1024) → ReLU → Dropout(0.3)
-→ cross-attention pool [B,1024]
+→ atom masked mean [B,256] + motif masked mean [B,256]
 ```
 
 Attention weights are returned only when explicitly requested:
@@ -116,7 +116,9 @@ Protein graph modes (`--protein_graph_mode`):
 | `dual_view` | Both mutually exclusive views above | Covalent GIN + noncovalent GINE | Node concatenation + MLP |
 
 In `dual_view`, corresponding residue embeddings from both branches are
-concatenated and projected from 512 to 256 dimensions before graph pooling:
+concatenated and projected from 512 to 256 dimensions. The current interaction
+path consumes residue tokens directly and does not construct a separate protein
+graph representation:
 
 ```text
 Residue features [N, 41]
@@ -125,9 +127,7 @@ Residue features [N, 41]
                                   │
                    concat + MLP: [N, 512] → [N, 256]
 residue_tokens: [N, 256]
-  └→ GraphPool(mean + add + max) [B,768]
-     → Linear(768→1024) → BatchNorm1d → ReLU → Dropout(0.3)
-     → protein_graph [B,1024]
+  └→ atom/motif–residue cross-attention Key/Value
 ```
 
 ## 🌐 Global Features
@@ -139,17 +139,20 @@ residue_tokens: [N, 256]
 
 Long protein sequences are chunked at 1022 residues; chunk embeddings are mean-pooled into the final 1280-dim vector.
 
+The projected ECFP4 and ESM-2 vectors are concatenated and jointly encoded by
+`Linear(512→512) → BatchNorm1d → ReLU → Dropout → Linear(512→256)`.
+
 ## ⚡ Fusion Head
 
 ```text
-cross_attention_pool: [B, 1024]
-protein_graph: [B, 1024]
-concat([cross_attention_pool, protein_graph, fp_proj, esm_proj]): [B, 2560]
+atom_repr:   [B, 256]
+motif_repr:  [B, 256]
+global_repr: [B, 256]
+concat([atom_repr, motif_repr, global_repr]): [B, 768]
 
-Linear(2560 → 2048) → BatchNorm1d → ReLU → Dropout(0.5)
-Linear(2048 → 1024) → BatchNorm1d → ReLU → Dropout(0.5)
-Linear(1024 →  512) → BatchNorm1d → ReLU → Dropout(0.5)
-Linear(512  →    1)
+Linear(768 → 512) → BatchNorm1d → ReLU → Dropout(0.5)
+Linear(512 → 256) → BatchNorm1d → ReLU → Dropout(0.5)
+Linear(256 → 1)
 ```
 
 ## 📂 Data Layout
@@ -264,7 +267,7 @@ bash scripts/unseen_pair.sh
 | `--batch_size`      | 32       | Batch size                       |
 | `--lr`              | 1e-4     | Learning rate (Adam)             |
 | `--patience`        | 30       | Early stopping patience          |
-| `--drug_graph_type` | `atom` | `atom`, `motif`, or `dual` |
+| `--drug_graph_type` | `dual` | `atom`, `motif`, or `dual` |
 | `--protein_graph_mode` | `dual_view` | `cov`, `noncov`, or `dual_view` |
 | `--atom_layer` | `1` | Number of atom GATv2 layers |
 | `--motif_layer` | `1` | Number of motif GATv2 layers |

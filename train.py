@@ -10,7 +10,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from models import DTAModel
-from models.dta_model import dta_collate_fn
+from models.dta_model import VALID_INTERACTION_TYPES, dta_collate_fn
 from utils import (
     TestbedDatasetHMol,
     ci_gpu,
@@ -39,10 +39,16 @@ def parse_args():
     parser.add_argument('--cache_dir', type=str, default='data/cache', help='Global cache directory')
     parser.add_argument('--split_root', type=str, default='data', help='Split csv root')
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
-    parser.add_argument('--drug_graph_type', type=str, default='atom', choices=['atom', 'motif', 'dual'], help='Select atom, motif, or dual-scale cross-attention pooling')
+    parser.add_argument(
+        '--interaction_type',
+        type=str,
+        default='atom_motif_global',
+        choices=VALID_INTERACTION_TYPES,
+        help='Select any non-empty atom, motif, and global interaction combination',
+    )
     parser.add_argument('--graph_pool_type', type=str, default='mean_add_max',
                         choices=['mean', 'add', 'max', 'mean_add', 'mean_max', 'add_max', 'mean_add_max'],
-                        help='Protein graph-readout pooling configuration')
+                        help='Legacy graph-readout pooling option; inactive in the current token-interaction path')
     parser.add_argument('--protein_graph_mode', type=str, default='dual_view',
                         choices=['cov', 'noncov', 'dual_view'],
                         help='Protein graph encoder: covalent GIN, noncovalent GINE, or dual view')
@@ -51,9 +57,6 @@ def parse_args():
     parser.add_argument('--protein_layer', type=int, default=1, help='Number of protein GIN/GINE layers')
     parser.add_argument('--embed_dim', type=int, default=256, help='Cross-attention embedding dimension')
     parser.add_argument('--num_heads', type=int, default=8, help='Cross-attention heads')
-    parser.add_argument('--modality_ablation', type=str, default='none', choices=['none', 'drug_fingerprint', 'protein_seq'],
-                        help='Optionally remove a global fingerprint or protein-sequence modality')
-
     parser.add_argument('--epochs', type=int, default=500, help='Max training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Peak learning rate')
@@ -189,20 +192,27 @@ def main():
     print(f'Device: {device}')
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
     print(
-        f'Cross-attention pooling: {args.drug_graph_type}, '
-        f'protein graph pooling: {args.graph_pool_type}, bottom-up atom-to-motif: always on, '
-        f'protein graph mode: {args.protein_graph_mode}, '
-        f'modality ablation: {args.modality_ablation}'
+        f'Interaction type: {args.interaction_type}, '
+        f'bottom-up atom-to-motif: always on, '
+        f'protein graph mode: {args.protein_graph_mode}'
     )
     print(
         f'Encoder layers: atom={args.atom_layer}, motif={args.motif_layer}, '
         f'protein={args.protein_layer}'
     )
-    print(f'Cross-attention: embed_dim={args.embed_dim}, num_heads={args.num_heads}, out_dim=1024')
+    interaction_parts = args.interaction_type.split('_')
+    fusion_dim = sum(
+        256 if part == 'global' else args.embed_dim
+        for part in interaction_parts
+    )
+    print(
+        f'Cross-attention: embed_dim={args.embed_dim}, num_heads={args.num_heads}; '
+        f'FusionHead input_dim={fusion_dim}'
+    )
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = DTAModel(
-        drug_graph_type=args.drug_graph_type,
+        interaction_type=args.interaction_type,
         graph_pool_type=args.graph_pool_type,
         protein_graph_mode=args.protein_graph_mode,
         atom_num_layers=args.atom_layer,
@@ -210,7 +220,6 @@ def main():
         protein_num_layers=args.protein_layer,
         embed_dim=args.embed_dim,
         num_heads=args.num_heads,
-        modality_ablation=args.modality_ablation,
     ).to(device)
     print('Parameter counts:', model.count_parameters())
 

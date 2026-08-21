@@ -8,13 +8,13 @@ do
     --gpu_idx 1 \
     --strategy unseen_drug \
     --seed "${seed}" \
-    --drug_graph_type dual \
+    --interaction_type atom_motif_global \
     --protein_graph_mode dual_view \
     --atom_layer 1 \
     --motif_layer 1 \
     --protein_layer 1 \
     --embed_dim 256 \
     --num_heads 8 \
-    --run_name cross_attention_pool \
+    --run_name interaction \
     "$@"
 done

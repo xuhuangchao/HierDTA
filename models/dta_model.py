@@ -1,15 +1,35 @@
 """Top-level DTA model and custom batching for nested PyG graph objects."""
 
-from typing import Any, List
+from typing import Any, List, Sequence
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 from torch_geometric.data import Batch, Data, HeteroData
 
-from .cross_attention import MultiScaleDrugResidueAttention
+from .cross_attention import MultiScaleAttention
 from .encoder import AtomGNN, ProteinGraphEncoder
 from .interaction import BottomUpAtomMotifFusion
+
+
+VALID_INTERACTION_TYPES = (
+    "atom",
+    "motif",
+    "global",
+    "atom_motif",
+    "atom_global",
+    "motif_global",
+    "atom_motif_global",
+)
+
+
+def _interaction_components(interaction_type: str):
+    if interaction_type not in VALID_INTERACTION_TYPES:
+        raise ValueError(
+            "interaction_type must be one of "
+            f"{list(VALID_INTERACTION_TYPES)}"
+        )
+    return frozenset(interaction_type.split("_"))
 
 
 class DTABatch:
@@ -86,80 +106,108 @@ class FinalFCLayers(nn.Module):
         self,
         in_dim: int,
         binary: int = 1,
+        hidden_dims: Sequence[int] = (512, 256),
         dropout: float = 0.5,
     ):
         super().__init__()
-        self.layers = nn.Sequential(
-            nn.Linear(in_dim, 2048),
-            nn.BatchNorm1d(2048),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(2048, 1024),
-            nn.BatchNorm1d(1024),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(1024, 512),
-            nn.BatchNorm1d(512),
-            nn.ReLU(),
-            nn.Dropout(dropout),
-            nn.Linear(512, binary),
-        )
+        if in_dim < 1 or binary < 1:
+            raise ValueError("in_dim and binary must be positive")
+        if any(hidden_dim < 1 for hidden_dim in hidden_dims):
+            raise ValueError("all hidden dimensions must be positive")
+
+        layers = []
+        current_dim = in_dim
+        for hidden_dim in hidden_dims:
+            layers.extend(
+                [
+                    nn.Linear(current_dim, hidden_dim),
+                    nn.BatchNorm1d(hidden_dim),
+                    nn.ReLU(),
+                    nn.Dropout(dropout),
+                ]
+            )
+            current_dim = hidden_dim
+        layers.append(nn.Linear(current_dim, binary))
+        self.layers = nn.Sequential(*layers)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.layers(x)
 
 
 class FusionHead(nn.Module):
-    """Fuse one structural representation with global descriptors."""
+    """Fuse only the representations selected by ``interaction_type``."""
 
     def __init__(
         self,
-        structural_dim: int = 1024,
+        interaction_dim: int = 256,
         fp_dim: int = 2048,
         fp_out_dim: int = 256,
         esm_in_dim: int = 1280,
         esm_out_dim: int = 256,
+        global_out_dim: int = 256,
         dropout: float = 0.5,
-        modality_ablation: str = "none",
+        interaction_type: str = "atom_motif_global",
     ):
         super().__init__()
-        self.modality_ablation = modality_ablation
-        self.fp_proj = None
-        if modality_ablation != "drug_fingerprint":
-            self.fp_proj = nn.Sequential(
-                nn.Linear(fp_dim, fp_out_dim),
-                nn.BatchNorm1d(fp_out_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-            )
+        self.interaction_type = interaction_type
+        self.components = _interaction_components(interaction_type)
 
-        self.esm_global_proj = None
-        if modality_ablation != "protein_seq":
-            self.esm_global_proj = nn.Sequential(
-                nn.Linear(esm_in_dim, esm_out_dim),
-                nn.BatchNorm1d(esm_out_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-            )
+        self.fp_proj = nn.Sequential(
+            nn.Linear(fp_dim, fp_out_dim),
+            nn.BatchNorm1d(fp_out_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.esm_global_proj = nn.Sequential(
+            nn.Linear(esm_in_dim, esm_out_dim),
+            nn.BatchNorm1d(esm_out_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+        )
+        self.global_encoder = FinalFCLayers(
+            in_dim=fp_out_dim + esm_out_dim,
+            binary=global_out_dim,
+            hidden_dims=(512,),
+            dropout=dropout,
+        )
 
-        fusion_dim = structural_dim
-        if self.fp_proj is not None:
-            fusion_dim += fp_out_dim
-        if self.esm_global_proj is not None:
-            fusion_dim += esm_out_dim
-        self.mlp = FinalFCLayers(fusion_dim, 1, dropout=0.5)
+        fusion_dim = 0
+        if "atom" in self.components:
+            fusion_dim += interaction_dim
+        if "motif" in self.components:
+            fusion_dim += interaction_dim
+        if "global" in self.components:
+            fusion_dim += global_out_dim
+
+        first_hidden_dim = min(512, fusion_dim)
+        second_hidden_dim = max(128, first_hidden_dim // 2)
+        self.mlp = FinalFCLayers(
+            in_dim=fusion_dim,
+            binary=1,
+            hidden_dims=(first_hidden_dim, second_hidden_dim),
+            dropout=dropout,
+        )
 
     def forward(
         self,
-        structural_repr: Tensor,
+        atom_repr: Tensor,
+        motif_repr: Tensor,
         fingerprint: Tensor,
         esm_global: Tensor,
     ) -> Tensor:
-        fusion_inputs = [structural_repr]
-        if self.fp_proj is not None:
-            fusion_inputs.append(self.fp_proj(fingerprint))
-        if self.esm_global_proj is not None:
-            fusion_inputs.append(self.esm_global_proj(esm_global))
+        fp_repr = self.fp_proj(fingerprint)
+        esm_repr = self.esm_global_proj(esm_global)
+        global_repr = self.global_encoder(
+            torch.cat([fp_repr, esm_repr], dim=-1)
+        )
+
+        fusion_inputs = []
+        if "atom" in self.components:
+            fusion_inputs.append(atom_repr)
+        if "motif" in self.components:
+            fusion_inputs.append(motif_repr)
+        if "global" in self.components:
+            fusion_inputs.append(global_repr)
 
         return self.mlp(torch.cat(fusion_inputs, dim=-1))
 
@@ -169,7 +217,7 @@ class DTAModel(nn.Module):
 
     def __init__(
         self,
-        drug_graph_type: str = "atom",
+        interaction_type: str = "atom_motif_global",
         atom_in_dim: int = 37,
         atom_edge_dim: int = 13,
         motif_in_dim: int = 50,
@@ -182,32 +230,21 @@ class DTAModel(nn.Module):
         graph_pool_type: str = "mean_add_max",
         embed_dim: int = 256,
         num_heads: int = 8,
-        cross_out_dim: int = 1024,
-        protein_graph_out_dim: int = 1024,
-        modality_ablation: str = "none",
         fp_dim: int = 2048,
         fp_out_dim: int = 256,
         esm_in_dim: int = 1280,
         esm_out_dim: int = 256,
-        dropout: float = 0.5,
+        global_out_dim: int = 256,
+        dropout: float = 0.3,
         protein_graph_mode: str = "cov",
     ):
         super().__init__()
-        if drug_graph_type not in ("atom", "motif", "dual"):
-            raise ValueError("drug_graph_type must be 'atom', 'motif', or 'dual'")
         if protein_graph_mode not in ("cov", "noncov", "dual_view"):
             raise ValueError(
                 "protein_graph_mode must be 'cov', 'noncov', or 'dual_view'"
             )
-        valid_ablations = {"none", "drug_fingerprint", "protein_seq"}
-        if modality_ablation not in valid_ablations:
-            raise ValueError(
-                f"modality_ablation must be one of {sorted(valid_ablations)}"
-            )
-
-        self.drug_graph_type = drug_graph_type
+        self.interaction_type = interaction_type
         self.protein_graph_mode = protein_graph_mode
-        self.modality_ablation = modality_ablation
 
         # ── drug encoder(s) ──────────────────────────────────────────
         self.atom_encoder = AtomGNN(
@@ -229,7 +266,6 @@ class DTAModel(nn.Module):
             node_key="motif",
             edge_key=("motif", "connects", "motif"),
         )
-
         self.atom_motif_fusion = BottomUpAtomMotifFusion(
             atom_dim=self.atom_encoder.node_out_dim,
             motif_dim=motif_in_dim,
@@ -241,30 +277,28 @@ class DTAModel(nn.Module):
             hidden_dim=protein_hidden_dim,
             num_layers=protein_num_layers,
             graph_pool_type=graph_pool_type,
-            graph_out_dim=protein_graph_out_dim,
             protein_edge_dim=10,
             protein_graph_mode=protein_graph_mode,
-            build_graph_head=True,
+            build_graph_head=False,
         )
-
-        self.cross_attention = MultiScaleDrugResidueAttention(
+        self.cross_attention = MultiScaleAttention(
             atom_dim=self.atom_encoder.node_out_dim,
             motif_dim=self.motif_encoder.node_out_dim,
             protein_dim=protein_hidden_dim,
             embed_dim=embed_dim,
             num_heads=num_heads,
-            out_dim=cross_out_dim,
         )
 
-        # ── fusion head (input dimension follows the retained modalities) ───
+        # ── Separate atom/motif interactions + 256-D global pair head ─────
         self.fusion_head = FusionHead(
-            structural_dim=cross_out_dim + protein_graph_out_dim,
+            interaction_dim=embed_dim,
             fp_dim=fp_dim,
             fp_out_dim=fp_out_dim,
             esm_in_dim=esm_in_dim,
             esm_out_dim=esm_out_dim,
+            global_out_dim=global_out_dim,
             dropout=dropout,
-            modality_ablation=modality_ablation,
+            interaction_type=interaction_type,
         )
 
     def forward(self, data: DTABatch, return_attention: bool = False):
@@ -286,29 +320,19 @@ class DTAModel(nn.Module):
             data.protein_graph.edge_index,
             data.protein_graph.edge_attr,
         )
-
-        cross_repr, attention_info = self.cross_attention(
+        atom_repr, motif_repr, attention_info = self.cross_attention(
             atom_h=atom_h,
             atom_batch=data.hetero["atom"].batch,
             motif_h=motif_h,
             motif_batch=data.hetero["motif"].batch,
             protein_h=protein_h,
             protein_batch=data.protein_graph.batch,
-            drug_graph_type=self.drug_graph_type,
             return_attention=return_attention,
         )
 
-        protein_graph_repr = self.protein_encoder.readout(
-            protein_h,
-            data.protein_graph.batch,
-        )
-        structural_repr = torch.cat(
-            [cross_repr, protein_graph_repr],
-            dim=-1,
-        )
-
         prediction = self.fusion_head(
-            structural_repr=structural_repr,
+            atom_repr=atom_repr,
+            motif_repr=motif_repr,
             fingerprint=data.fingerprint,
             esm_global=data.esm_global,
         )
