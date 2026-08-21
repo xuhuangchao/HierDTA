@@ -6,15 +6,16 @@ Hierarchical Drug-Target Affinity prediction model that jointly encodes atom-lev
 
 ```
 data.hetero: atom GATv2 → atom tokens [N_atom, 74]
-       │ atom→motif membership aggregation
+       │ atom→motif membership aggregation (always active)
        └→ motif GATv2 → motif tokens [N_motif, 100]
 
 data.protein_graph → covalent GIN / noncovalent GINE → residue tokens [N_res, 256]
   ├→ cross-attention Key/Value
   └→ graph readout → protein graph [B, 1024]
 
-atom + motif tokens (Query) → residue tokens (Key/Value)
-  → multi-head cross-attention → scale-balanced mean pooling → [B, 1024]
+atom/motif tokens (Query) → residue tokens (Key/Value)
+  → cross-attention → scale-specific mean → Linear(256→1024)
+  → cross-attention pool [B, 1024]
 
 cross-attention pool [B, 1024] + protein graph [B, 1024]
   + fingerprint [B, 256] + ESM-2 [B, 256] → MLP → affinity
@@ -34,9 +35,9 @@ The molecular heterogeneous graph is built by `preprocessing/chemutils.py` via H
 
 ### Drug Graph Modes (`--drug_graph_type`)
 
-All three modes run the same atom encoder, bottom-up atom→motif update,
-motif encoder, protein encoder, and cross-attention. The option changes which
-scale-specific pooled slot is retained, while the downstream width stays fixed.
+All three modes run the atom encoder, bottom-up atom→motif update, motif
+encoder, protein encoder, and cross-attention. The option changes which
+scale-specific pooled representation is retained before `pool_proj`.
 
 | Mode | Cross-attention pooling input |
 | ---- | ----------------------------- |
@@ -49,7 +50,7 @@ scale-specific pooled slot is retained, while the downstream width stays fixed.
 ```text
 GATv2Conv(37 → 37, heads=2, concat=True, edge_dim=13)
 ReLU
-atom_tokens: [N_atom, 74]
+atom_tokens: [N_atom,74]
 ```
 
 #### Motif Branch
@@ -57,13 +58,13 @@ atom_tokens: [N_atom, 74]
 ```text
 GATv2Conv(50 → 50, heads=2, concat=True, edge_dim=37)
 ReLU
-motif_tokens: [N_motif, 100]
+motif_tokens: [N_motif,100]
 ```
 
 #### Multi-scale Drug–Residue Cross-Attention
 
 ```text
-atom tokens  [N_atom,74]  → Linear(74→256)  + atom type embedding ─┐
+atom tokens  [N_atom,74]   → Linear(74→256)  + atom type embedding ─┐
 motif tokens [N_motif,100] → Linear(100→256) + motif type embedding ├─ Query
 residue tokens [N_res,256] → Linear(256→256) ───────────────────────┴─ Key/Value
 
@@ -75,8 +76,14 @@ MultiheadAttention(embed_dim=256, heads=8, dropout=0.1)
 → cross-attention pool [B,1024]
 ```
 
-Attention weights are produced only when `model(data, return_attention=True)`
-is explicitly requested; ordinary training avoids retaining the large matrix.
+Attention weights are returned only when explicitly requested:
+
+```python
+prediction, attention_info = model(data, return_attention=True)
+```
+
+The graph-level `GatedFusionLayer` is retained as commented experimental code
+in `models/dta_model.py` and is not instantiated in the current model.
 
 #### Bottom-Up Atom→Motif Update
 
@@ -109,7 +116,7 @@ Protein graph modes (`--protein_graph_mode`):
 | `dual_view` | Both mutually exclusive views above | Covalent GIN + noncovalent GINE | Node concatenation + MLP |
 
 In `dual_view`, corresponding residue embeddings from both branches are
-concatenated and projected from 512 to 256 dimensions before cross-attention:
+concatenated and projected from 512 to 256 dimensions before graph pooling:
 
 ```text
 Residue features [N, 41]
@@ -118,7 +125,6 @@ Residue features [N, 41]
                                   │
                    concat + MLP: [N, 512] → [N, 256]
 residue_tokens: [N, 256]
-  ├→ cross-attention Key/Value
   └→ GraphPool(mean + add + max) [B,768]
      → Linear(768→1024) → BatchNorm1d → ReLU → Dropout(0.3)
      → protein_graph [B,1024]
@@ -235,7 +241,7 @@ Single run:
 python train.py --dataset davis --strategy warm --seed 41 --drug_graph_type atom
 ```
 
-Dual-scale cross-attention run:
+Bottom-up dual-scale cross-attention run:
 
 ```bash
 python train.py --dataset davis --strategy unseen_drug --seed 41 --drug_graph_type dual
@@ -293,7 +299,7 @@ HierDTA/
 │
 ├── models/
 │   ├── __init__.py                       # Module exports
-│   ├── dta_model.py                      # DTAModel, FusionHead, DTABatch, collate
+│   ├── dta_model.py                      # DTAModel, FusionHead, batching
 │   ├── cross_attention.py                # Multi-scale drug-residue cross-attention
 │   └── encoder.py                        # AtomGNN (GATv2), ProteinGraphEncoder (GIN/GINE)
 │

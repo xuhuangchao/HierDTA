@@ -55,9 +55,8 @@ class MultiScaleDrugResidueAttention(nn.Module):
         )
         self.ffn_norm = nn.LayerNorm(embed_dim)
 
-        pooled_dim = embed_dim
         self.pool_proj = nn.Sequential(
-            nn.Linear(pooled_dim, out_dim),
+            nn.Linear(embed_dim, out_dim),
             nn.ReLU(),
             nn.Dropout(0.3),
         )
@@ -123,7 +122,6 @@ class MultiScaleDrugResidueAttention(nn.Module):
         elif drug_graph_type == "motif":
             pooled = motif_mean
         else:
-            # Equal scale weighting avoids atom-count dominance in dual mode.
             pooled = 0.5 * (atom_mean + motif_mean)
         cross_repr = self.pool_proj(pooled)
 

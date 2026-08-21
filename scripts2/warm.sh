@@ -1,5 +1,5 @@
 #!/bin/bash
-# Davis warm-split evaluation for dual-scale drug-residue cross-attention.
+# Davis warm-split evaluation for bottom-up dual-scale cross-attention.
 for seed in 41 42 43 32 33
 do
   python train.py \
@@ -14,6 +14,6 @@ do
     --protein_layer 1 \
     --embed_dim 256 \
     --num_heads 8 \
-    --run_name cross_attn_mean_pgskip \
+    --run_name cross_attention_pool \
     "$@"
 done

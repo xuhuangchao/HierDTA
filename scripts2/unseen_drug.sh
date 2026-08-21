@@ -15,6 +15,6 @@ do
     --protein_layer 1 \
     --embed_dim 256 \
     --num_heads 8 \
-    --run_name cross_attn_mean_pgskip \
+    --run_name cross_attention_pool \
     "$@"
 done

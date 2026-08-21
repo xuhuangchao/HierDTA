@@ -55,6 +55,32 @@ def dta_collate_fn(data_list: List[Any]) -> DTABatch:
     )
 
 
+# Experimental graph-level fusion retained for a future ablation, but inactive
+# in the current cross-attention training path.
+#
+# class GatedFusionLayer(nn.Module):
+#     def __init__(self, v_dim, q_dim, output_dim=128, dropout_rate=0.2):
+#         super(GatedFusionLayer, self).__init__()
+#         self.v_transform = nn.Linear(v_dim, output_dim)
+#         self.q_transform = nn.Linear(q_dim, output_dim)
+#         self.gate_transform = nn.Linear(output_dim * 2, output_dim)
+#         self.activation = nn.Tanh()
+#         self.output_dim = output_dim
+#
+#     def get_output_shape(self):
+#         return self.output_dim
+#
+#     def forward(self, v, q, return_gate=False):
+#         v_proj = self.activation(self.v_transform(v))
+#         q_proj = self.activation(self.q_transform(q))
+#         concat_proj = torch.cat([v_proj, q_proj], dim=1)
+#         gate = torch.sigmoid(self.gate_transform(concat_proj))
+#         gated_output = gate * v_proj + (1 - gate) * q_proj
+#         if return_gate:
+#             return gated_output, gate
+#         return gated_output
+
+
 class FinalFCLayers(nn.Module):
     def __init__(
         self,
@@ -139,7 +165,7 @@ class FusionHead(nn.Module):
 
 
 class DTAModel(nn.Module):
-    """Hierarchical DTA model with fine-grained drug-residue interaction."""
+    """Hierarchical DTA model with drug-residue cross-attention pooling."""
 
     def __init__(
         self,
@@ -156,6 +182,8 @@ class DTAModel(nn.Module):
         graph_pool_type: str = "mean_add_max",
         embed_dim: int = 256,
         num_heads: int = 8,
+        cross_out_dim: int = 1024,
+        protein_graph_out_dim: int = 1024,
         modality_ablation: str = "none",
         fp_dim: int = 2048,
         fp_out_dim: int = 256,
@@ -213,7 +241,7 @@ class DTAModel(nn.Module):
             hidden_dim=protein_hidden_dim,
             num_layers=protein_num_layers,
             graph_pool_type=graph_pool_type,
-            graph_out_dim=1024,
+            graph_out_dim=protein_graph_out_dim,
             protein_edge_dim=10,
             protein_graph_mode=protein_graph_mode,
             build_graph_head=True,
@@ -225,12 +253,12 @@ class DTAModel(nn.Module):
             protein_dim=protein_hidden_dim,
             embed_dim=embed_dim,
             num_heads=num_heads,
-            out_dim=1024,
+            out_dim=cross_out_dim,
         )
 
         # ── fusion head (input dimension follows the retained modalities) ───
         self.fusion_head = FusionHead(
-            structural_dim=2048,
+            structural_dim=cross_out_dim + protein_graph_out_dim,
             fp_dim=fp_dim,
             fp_out_dim=fp_out_dim,
             esm_in_dim=esm_in_dim,
@@ -252,6 +280,7 @@ class DTAModel(nn.Module):
             data.hetero,
             x_override=motif_x,
         )
+
         protein_h = self.protein_encoder.encode_nodes(
             data.protein_graph.x,
             data.protein_graph.edge_index,
@@ -268,6 +297,7 @@ class DTAModel(nn.Module):
             drug_graph_type=self.drug_graph_type,
             return_attention=return_attention,
         )
+
         protein_graph_repr = self.protein_encoder.readout(
             protein_h,
             data.protein_graph.batch,

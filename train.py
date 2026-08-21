@@ -42,7 +42,7 @@ def parse_args():
     parser.add_argument('--drug_graph_type', type=str, default='atom', choices=['atom', 'motif', 'dual'], help='Select atom, motif, or dual-scale cross-attention pooling')
     parser.add_argument('--graph_pool_type', type=str, default='mean_add_max',
                         choices=['mean', 'add', 'max', 'mean_add', 'mean_max', 'add_max', 'mean_add_max'],
-                        help='Legacy graph-readout option (node cross-attention uses fixed mean-max pooling)')
+                        help='Protein graph-readout pooling configuration')
     parser.add_argument('--protein_graph_mode', type=str, default='dual_view',
                         choices=['cov', 'noncov', 'dual_view'],
                         help='Protein graph encoder: covalent GIN, noncovalent GINE, or dual view')
@@ -50,7 +50,7 @@ def parse_args():
     parser.add_argument('--motif_layer', type=int, default=1, help='Number of motif GATv2 layers')
     parser.add_argument('--protein_layer', type=int, default=1, help='Number of protein GIN/GINE layers')
     parser.add_argument('--embed_dim', type=int, default=256, help='Cross-attention embedding dimension')
-    parser.add_argument('--num_heads', type=int, default=8, help='Number of cross-attention heads')
+    parser.add_argument('--num_heads', type=int, default=8, help='Cross-attention heads')
     parser.add_argument('--modality_ablation', type=str, default='none', choices=['none', 'drug_fingerprint', 'protein_seq'],
                         help='Optionally remove a global fingerprint or protein-sequence modality')
 
@@ -60,7 +60,7 @@ def parse_args():
     parser.add_argument('--patience', type=int, default=30, help='Early stopping patience')
     parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
     parser.add_argument('--log_interval', type=int, default=20, help='Training log interval')
-    parser.add_argument('--run_name', type=str, default='avg_am2protein_sharedq', help='Output filename suffix')
+    parser.add_argument('--run_name', type=str, default='cross_attention_pool', help='Output filename suffix')
 
     return parser.parse_args()
 
@@ -189,14 +189,16 @@ def main():
     print(f'Device: {device}')
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
     print(
-        f'Cross pooling: scale-wise mean-max, protein graph mode: {args.protein_graph_mode}, '
+        f'Cross-attention pooling: {args.drug_graph_type}, '
+        f'protein graph pooling: {args.graph_pool_type}, bottom-up atom-to-motif: always on, '
+        f'protein graph mode: {args.protein_graph_mode}, '
         f'modality ablation: {args.modality_ablation}'
     )
     print(
         f'Encoder layers: atom={args.atom_layer}, motif={args.motif_layer}, '
         f'protein={args.protein_layer}'
     )
-    print(f'Cross-attention: embed_dim={args.embed_dim}, num_heads={args.num_heads}')
+    print(f'Cross-attention: embed_dim={args.embed_dim}, num_heads={args.num_heads}, out_dim=1024')
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = DTAModel(
