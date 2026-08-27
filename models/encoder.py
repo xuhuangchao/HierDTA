@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import (
     GATv2Conv,
+    GCNConv,
     GINConv,
     GINEConv,
     global_add_pool,
@@ -26,23 +27,28 @@ class AtomGNN(nn.Module):
         graph_out_dim=1024,
         post_dropout=0.3,
         build_graph_head=True,
+        gnn_type="gat",
         node_key="atom",
         edge_key=("atom", "bond", "atom"),
     ):
         super().__init__()
         if num_layers < 1:
             raise ValueError("AtomGNN requires num_layers >= 1")
+        if gnn_type not in {"gat", "gin", "gcn"}:
+            raise ValueError("gnn_type must be 'gat', 'gin', or 'gcn'")
         self.in_dim = in_dim
         self.heads = heads
+        self.gnn_type = gnn_type
         self.node_key = node_key
         self.edge_key = edge_key
         self.graph_pool_type = graph_pool_type
 
         self.convs = nn.ModuleList()
         layer_in = in_dim
+        node_out_dim = in_dim * heads
         for _ in range(num_layers):
-            self.convs.append(
-                GATv2Conv(
+            if gnn_type == "gat":
+                conv = GATv2Conv(
                     layer_in,
                     in_dim,
                     heads=heads,
@@ -50,8 +56,17 @@ class AtomGNN(nn.Module):
                     edge_dim=edge_dim,
                     dropout=gat_dropout,
                 )
-            )
-            layer_in = in_dim * heads
+            elif gnn_type == "gin":
+                update_mlp = nn.Sequential(
+                    nn.Linear(layer_in, node_out_dim),
+                    nn.ReLU(),
+                    nn.Linear(node_out_dim, node_out_dim),
+                )
+                conv = GINConv(update_mlp)
+            else:
+                conv = GCNConv(layer_in, node_out_dim)
+            self.convs.append(conv)
+            layer_in = node_out_dim
         self.activation = nn.ReLU()
 
         self.graph_proj = None
@@ -98,7 +113,11 @@ class AtomGNN(nn.Module):
         edge_index = data[self.edge_key].edge_index
         edge_attr = data[self.edge_key].edge_attr
         for conv in self.convs:
-            x = self.activation(conv(x, edge_index, edge_attr=edge_attr))
+            if self.gnn_type == "gat":
+                x = conv(x, edge_index, edge_attr=edge_attr)
+            else:
+                x = conv(x, edge_index)
+            x = self.activation(x)
         return x
 
     def readout(self, node_h, batch):
@@ -113,14 +132,7 @@ class AtomGNN(nn.Module):
 
 
 class ProteinGraphEncoder(nn.Module):
-    """Encode mutually exclusive covalent and noncovalent residue views.
-
-    ``cov`` uses a GIN over peptide/covalent edges. ``noncov`` uses a GINE
-    over the remaining residue pairs and their nine physicochemical
-    interaction channels. ``dual_view`` encodes both views independently,
-    concatenates corresponding residue embeddings, and fuses them with an MLP
-    before graph-level pooling.
-    """
+    """Encode a residue graph with GINE over all 10-dimensional edge features."""
 
     def __init__(
         self,
@@ -131,62 +143,26 @@ class ProteinGraphEncoder(nn.Module):
         graph_out_dim=1024,
         post_dropout=0.3,
         protein_edge_dim=10,
-        protein_graph_mode="cov",
         build_graph_head=True,
     ):
         super().__init__()
-        valid_modes = {"cov", "noncov", "dual_view"}
-        if protein_graph_mode not in valid_modes:
-            raise ValueError(
-                f"protein_graph_mode must be one of {sorted(valid_modes)}"
-            )
         if num_layers < 1:
             raise ValueError("ProteinGraphEncoder requires num_layers >= 1")
-        if protein_edge_dim < 2:
-            raise ValueError(
-                "protein_edge_dim must include covalent and noncovalent channels"
-            )
+        if protein_edge_dim < 1:
+            raise ValueError("protein_edge_dim must be positive")
 
         self.graph_pool_type = graph_pool_type
         self.protein_edge_dim = protein_edge_dim
-        self.protein_graph_mode = protein_graph_mode
-
-        if protein_graph_mode == "cov":
-            self.convs = self._build_convs(
-                conv_type="gin",
-                protein_in_dim=protein_in_dim,
-                hidden_dim=hidden_dim,
-                num_layers=num_layers,
-                noncov_edge_dim=protein_edge_dim - 1,
-            )
-        elif protein_graph_mode == "noncov":
-            self.convs = self._build_convs(
-                conv_type="gine",
-                protein_in_dim=protein_in_dim,
-                hidden_dim=hidden_dim,
-                num_layers=num_layers,
-                noncov_edge_dim=protein_edge_dim - 1,
-            )
-        else:
-            self.cov_convs = self._build_convs(
-                conv_type="gin",
-                protein_in_dim=protein_in_dim,
-                hidden_dim=hidden_dim,
-                num_layers=num_layers,
-                noncov_edge_dim=protein_edge_dim - 1,
-            )
-            self.noncov_convs = self._build_convs(
-                conv_type="gine",
-                protein_in_dim=protein_in_dim,
-                hidden_dim=hidden_dim,
-                num_layers=num_layers,
-                noncov_edge_dim=protein_edge_dim - 1,
-            )
-            self.node_fusion = nn.Sequential(
-                nn.Linear(hidden_dim * 2, hidden_dim),
-                nn.LayerNorm(hidden_dim),
+        self.convs = nn.ModuleList()
+        for layer_idx in range(num_layers):
+            in_dim = protein_in_dim if layer_idx == 0 else hidden_dim
+            update_mlp = nn.Sequential(
+                nn.Linear(in_dim, hidden_dim),
                 nn.ReLU(),
-                nn.Dropout(post_dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+            )
+            self.convs.append(
+                GINEConv(update_mlp, edge_dim=protein_edge_dim)
             )
 
         self.activation = nn.ReLU()
@@ -202,96 +178,11 @@ class ProteinGraphEncoder(nn.Module):
                 nn.Dropout(post_dropout),
             )
 
-    @staticmethod
-    def _build_convs(
-        conv_type,
-        protein_in_dim,
-        hidden_dim,
-        num_layers,
-        noncov_edge_dim,
-    ):
-        convs = nn.ModuleList()
-        for layer_idx in range(num_layers):
-            in_dim = protein_in_dim if layer_idx == 0 else hidden_dim
-            update_mlp = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim),
-                nn.ReLU(),
-                nn.Linear(hidden_dim, hidden_dim),
-            )
-            if conv_type == "gin":
-                convs.append(GINConv(update_mlp))
-            elif conv_type == "gine":
-                convs.append(
-                    GINEConv(update_mlp, edge_dim=noncov_edge_dim)
-                )
-            else:
-                raise ValueError(f"Unsupported protein convolution type: {conv_type}")
-        return convs
-
-    def _split_edges(self, edge_index, edge_attr):
-        if edge_attr is None:
-            raise ValueError(
-                f"edge_attr is required for protein_graph_mode='{self.protein_graph_mode}'"
-            )
-        if edge_attr.ndim != 2 or edge_attr.size(0) != edge_index.size(1):
-            raise ValueError(
-                "Protein edge_attr must have shape [num_edges, protein_edge_dim]"
-            )
-        if edge_attr.size(1) != self.protein_edge_dim:
-            raise ValueError(
-                f"Expected {self.protein_edge_dim} protein edge features, "
-                f"got {edge_attr.size(1)}"
-            )
-
-        cov_mask = edge_attr[:, 0] > 0
-        noncov_mask = (
-            (edge_attr[:, 0] == 0)
-            & (edge_attr[:, 1:].sum(dim=-1) > 0)
-        )
-        cov_edge_index = edge_index[:, cov_mask]
-        noncov_edge_index = edge_index[:, noncov_mask]
-        noncov_edge_attr = edge_attr[noncov_mask, 1:]
-        return cov_edge_index, noncov_edge_index, noncov_edge_attr
-
-    def _encode_gin(self, x, edge_index, convs):
-        for conv in convs:
-            x = self.activation(conv(x, edge_index))
-        return x
-
-    def _encode_gine(self, x, edge_index, edge_attr, convs):
-        for conv in convs:
-            x = self.activation(conv(x, edge_index, edge_attr=edge_attr))
-        return x
-
     def encode_nodes(self, x, edge_index, edge_attr=None):
-        """Return edge-type-aware residue embeddings before graph pooling."""
-        cov_edge_index, noncov_edge_index, noncov_edge_attr = (
-            self._split_edges(edge_index, edge_attr)
-        )
-
-        if self.protein_graph_mode == "cov":
-            x = self._encode_gin(x, cov_edge_index, self.convs)
-        elif self.protein_graph_mode == "noncov":
-            x = self._encode_gine(
-                x,
-                noncov_edge_index,
-                noncov_edge_attr,
-                self.convs,
-            )
-        else:
-            cov_x = self._encode_gin(
-                x,
-                cov_edge_index,
-                self.cov_convs,
-            )
-            noncov_x = self._encode_gine(
-                x,
-                noncov_edge_index,
-                noncov_edge_attr,
-                self.noncov_convs,
-            )
-            x = self.node_fusion(torch.cat([cov_x, noncov_x], dim=-1))
-
+        """Return residue embeddings after full-edge GINE message passing."""
+        for conv in self.convs:
+            x = conv(x, edge_index, edge_attr=edge_attr)
+            x = self.activation(x)
         return x
 
     def readout(self, node_h, batch):

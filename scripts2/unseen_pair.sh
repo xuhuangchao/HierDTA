@@ -9,12 +9,12 @@ do
     --strategy unseen_pair \
     --seed "${seed}" \
     --interaction_type atom_motif_global \
-    --protein_graph_mode dual_view \
-    --atom_layer 1 \
+    --drug_gnn_type gat \
+    --atom_layer 2 \
     --motif_layer 1 \
-    --protein_layer 1 \
+    --protein_layer 2 \
     --embed_dim 256 \
     --num_heads 8 \
-    --run_name interaction \
+    --run_name dta_0822 \
     "$@"
 done

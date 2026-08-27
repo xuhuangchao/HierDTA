@@ -9,7 +9,7 @@ data.hetero: atom GATv2 → atom tokens [N_atom, 74]
        │ atom→motif membership aggregation (always active)
        └→ motif GATv2 → motif tokens [N_motif, 100]
 
-data.protein_graph → covalent GIN / noncovalent GINE → residue tokens [N_res, 256]
+data.protein_graph → full-edge GINE (10D edge features) → residue tokens [N_res, 256]
   └→ cross-attention Key/Value
 
 atom/motif tokens (Query) → residue tokens (Key/Value)
@@ -26,6 +26,11 @@ atom [B,256] + motif [B,256] + global [B,256]
 ## 💊 Drug Graph Encoder
 
 The molecular heterogeneous graph is built by `preprocessing/chemutils.py` via HimGNN-style functional-group decomposition (38 rule-based detectors from `func_group/Substructure_Extraction.py`). The graph contains two node types and three edge types:
+
+Both atom and motif encoders share the selectable `--drug_gnn_type` backend.
+`gat` uses GATv2 with the available edge attributes, whereas standard `gin`
+and `gcn` use graph connectivity only. All three choices preserve the same
+74-dimensional atom-token and 100-dimensional motif-token interfaces.
 
 | Component          | Key                                  | Shape                          | Description                                                                      |
 | ------------------ | ------------------------------------ | ------------------------------ | -------------------------------------------------------------------------------- |
@@ -107,26 +112,16 @@ Each protein entry:
 }
 ```
 
-Protein graph modes (`--protein_graph_mode`):
-
-| Mode | Edge selection | Encoder | Fusion |
-| ---- | -------------- | ------- | ------ |
-| `cov` | `edge_attr[:, 0] == 1` | GIN | — |
-| `noncov` | `edge_attr[:, 0] == 0` and any channel 1–9 is active | GINE with 9D edge features | — |
-| `dual_view` | Both mutually exclusive views above | Covalent GIN + noncovalent GINE | Node concatenation + MLP |
-
-In `dual_view`, corresponding residue embeddings from both branches are
-concatenated and projected from 512 to 256 dimensions. The current interaction
-path consumes residue tokens directly and does not construct a separate protein
-graph representation:
+The protein encoder processes every residue edge with a single GINE stack. Its
+complete 10-dimensional edge vector—the covalent indicator plus nine
+physicochemical interaction channels—is supplied directly to each GINE layer.
+No covalent/noncovalent split or dual-view node fusion is performed. The current
+interaction path consumes residue tokens directly and does not construct a
+separate protein graph representation:
 
 ```text
 Residue features [N, 41]
-  ├── covalent GIN ──────► [N, 256]
-  └── noncovalent GINE ───► [N, 256]
-                                  │
-                   concat + MLP: [N, 512] → [N, 256]
-residue_tokens: [N, 256]
+  └→ GINE(edge_dim=10) → ReLU → residue_tokens [N, 256]
   └→ atom/motif–residue cross-attention Key/Value
 ```
 
@@ -268,10 +263,10 @@ bash scripts/unseen_pair.sh
 | `--lr`              | 1e-4     | Learning rate (Adam)             |
 | `--patience`        | 30       | Early stopping patience          |
 | `--drug_graph_type` | `dual` | `atom`, `motif`, or `dual` |
-| `--protein_graph_mode` | `dual_view` | `cov`, `noncov`, or `dual_view` |
-| `--atom_layer` | `1` | Number of atom GATv2 layers |
-| `--motif_layer` | `1` | Number of motif GATv2 layers |
-| `--protein_layer` | `1` | Number of protein GIN/GINE layers |
+| `--drug_gnn_type` | `gat` | Drug encoder backend: `gat`, `gin`, or `gcn` |
+| `--atom_layer` | `1` | Number of atom GNN layers |
+| `--motif_layer` | `1` | Number of motif GNN layers |
+| `--protein_layer` | `1` | Number of protein GINE layers |
 | `--embed_dim` | `256` | Cross-attention embedding width |
 | `--num_heads` | `8` | Cross-attention heads |
 | `--modality_ablation` | `none` | `none`, `drug_fingerprint`, or `protein_seq` |

@@ -107,7 +107,7 @@ class FinalFCLayers(nn.Module):
         in_dim: int,
         binary: int = 1,
         hidden_dims: Sequence[int] = (512, 256),
-        dropout: float = 0.5,
+        dropout: float = 0.3,
     ):
         super().__init__()
         if in_dim < 1 or binary < 1:
@@ -121,7 +121,6 @@ class FinalFCLayers(nn.Module):
             layers.extend(
                 [
                     nn.Linear(current_dim, hidden_dim),
-                    nn.BatchNorm1d(hidden_dim),
                     nn.ReLU(),
                     nn.Dropout(dropout),
                 ]
@@ -145,7 +144,7 @@ class FusionHead(nn.Module):
         esm_in_dim: int = 1280,
         esm_out_dim: int = 256,
         global_out_dim: int = 256,
-        dropout: float = 0.5,
+        dropout: float = 0.3,
         interaction_type: str = "atom_motif_global",
     ):
         super().__init__()
@@ -154,13 +153,11 @@ class FusionHead(nn.Module):
 
         self.fp_proj = nn.Sequential(
             nn.Linear(fp_dim, fp_out_dim),
-            nn.BatchNorm1d(fp_out_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
         )
         self.esm_global_proj = nn.Sequential(
             nn.Linear(esm_in_dim, esm_out_dim),
-            nn.BatchNorm1d(esm_out_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
         )
@@ -179,12 +176,12 @@ class FusionHead(nn.Module):
         if "global" in self.components:
             fusion_dim += global_out_dim
 
-        first_hidden_dim = min(512, fusion_dim)
-        second_hidden_dim = max(128, first_hidden_dim // 2)
+        # first_hidden_dim = min(512, fusion_dim)
+        # second_hidden_dim = max(128, first_hidden_dim // 2)
         self.mlp = FinalFCLayers(
             in_dim=fusion_dim,
             binary=1,
-            hidden_dims=(first_hidden_dim, second_hidden_dim),
+            hidden_dims=(1024, 256), # 768->1024->256
             dropout=dropout,
         )
 
@@ -227,6 +224,7 @@ class DTAModel(nn.Module):
         protein_hidden_dim: int = 256,
         atom_num_layers: int = 1,
         motif_num_layers: int = 1,
+        drug_gnn_type: str = "gat",
         graph_pool_type: str = "mean_add_max",
         embed_dim: int = 256,
         num_heads: int = 8,
@@ -236,15 +234,13 @@ class DTAModel(nn.Module):
         esm_out_dim: int = 256,
         global_out_dim: int = 256,
         dropout: float = 0.3,
-        protein_graph_mode: str = "cov",
+        use_agg: bool = True,
     ):
         super().__init__()
-        if protein_graph_mode not in ("cov", "noncov", "dual_view"):
-            raise ValueError(
-                "protein_graph_mode must be 'cov', 'noncov', or 'dual_view'"
-            )
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError("dropout must satisfy 0 <= dropout < 1")
         self.interaction_type = interaction_type
-        self.protein_graph_mode = protein_graph_mode
+        self.use_agg = use_agg
 
         # ── drug encoder(s) ──────────────────────────────────────────
         self.atom_encoder = AtomGNN(
@@ -253,6 +249,7 @@ class DTAModel(nn.Module):
             num_layers=atom_num_layers,
             graph_pool_type=graph_pool_type,
             build_graph_head=False,
+            gnn_type=drug_gnn_type,
             node_key="atom",
             edge_key=("atom", "bond", "atom"),
         )
@@ -263,13 +260,16 @@ class DTAModel(nn.Module):
             num_layers=motif_num_layers,
             graph_pool_type=graph_pool_type,
             build_graph_head=False,
+            gnn_type=drug_gnn_type,
             node_key="motif",
             edge_key=("motif", "connects", "motif"),
         )
-        self.atom_motif_fusion = BottomUpAtomMotifFusion(
-            atom_dim=self.atom_encoder.node_out_dim,
-            motif_dim=motif_in_dim,
-        )
+        self.atom_motif_fusion = None
+        if self.use_agg:
+            self.atom_motif_fusion = BottomUpAtomMotifFusion(
+                atom_dim=self.atom_encoder.node_out_dim,
+                motif_dim=motif_in_dim,
+            )
 
         # ── protein encoder ──────────────────────────────────────────
         self.protein_encoder = ProteinGraphEncoder(
@@ -278,7 +278,6 @@ class DTAModel(nn.Module):
             num_layers=protein_num_layers,
             graph_pool_type=graph_pool_type,
             protein_edge_dim=10,
-            protein_graph_mode=protein_graph_mode,
             build_graph_head=False,
         )
         self.cross_attention = MultiScaleAttention(
@@ -303,13 +302,15 @@ class DTAModel(nn.Module):
 
     def forward(self, data: DTABatch, return_attention: bool = False):
         atom_h = self.atom_encoder.encode_nodes(data.hetero)
-        motif_x = self.atom_motif_fusion(
-            atom_h=atom_h,
-            motif_x=data.hetero["motif"].x,
-            membership_edge_index=data.hetero[
-                "atom", "in", "motif"
-            ].edge_index,
-        )
+        motif_x = data.hetero["motif"].x
+        if self.atom_motif_fusion is not None:
+            motif_x = self.atom_motif_fusion(
+                atom_h=atom_h,
+                motif_x=motif_x,
+                membership_edge_index=data.hetero[
+                    "atom", "in", "motif"
+                ].edge_index,
+            )
         motif_h = self.motif_encoder.encode_nodes(
             data.hetero,
             x_override=motif_x,
@@ -357,7 +358,10 @@ class DTAModel(nn.Module):
         if self.motif_encoder is not None:
             print(self.motif_encoder)
         print("── atom_motif_fusion ──")
-        print(self.atom_motif_fusion)
+        if self.atom_motif_fusion is None:
+            print("Disabled (use_agg=False)")
+        else:
+            print(self.atom_motif_fusion)
         print("── protein_encoder ──")
         print(self.protein_encoder)
         print("── cross_attention ──")

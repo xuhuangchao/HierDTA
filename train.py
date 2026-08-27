@@ -25,6 +25,20 @@ from utils import (
 METRIC_NAMES = ['rmse', 'mse', 'pearson', 'ci', 'rm2']
 
 
+def str_to_bool(value):
+    """Parse an explicit boolean value from the command line."""
+    if isinstance(value, bool):
+        return value
+    normalized = value.strip().lower()
+    if normalized in {'true', '1', 'yes', 'y', 'on'}:
+        return True
+    if normalized in {'false', '0', 'no', 'n', 'off'}:
+        return False
+    raise argparse.ArgumentTypeError(
+        f"Expected a boolean value for use_agg, received: {value!r}"
+    )
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description='Train and predict with DTAModel')
 
@@ -49,14 +63,17 @@ def parse_args():
     parser.add_argument('--graph_pool_type', type=str, default='mean_add_max',
                         choices=['mean', 'add', 'max', 'mean_add', 'mean_max', 'add_max', 'mean_add_max'],
                         help='Legacy graph-readout pooling option; inactive in the current token-interaction path')
-    parser.add_argument('--protein_graph_mode', type=str, default='dual_view',
-                        choices=['cov', 'noncov', 'dual_view'],
-                        help='Protein graph encoder: covalent GIN, noncovalent GINE, or dual view')
-    parser.add_argument('--atom_layer', type=int, default=1, help='Number of atom GATv2 layers')
-    parser.add_argument('--motif_layer', type=int, default=1, help='Number of motif GATv2 layers')
+    parser.add_argument('--drug_gnn_type', type=str, default='gat', choices=['gat', 'gin', 'gcn'],
+                        help='GNN backend shared by atom and motif drug encoders')
+    parser.add_argument('--atom_layer', type=int, default=1, help='Number of atom GNN layers')
+    parser.add_argument('--motif_layer', type=int, default=1, help='Number of motif GNN layers')
     parser.add_argument('--protein_layer', type=int, default=1, help='Number of protein GIN/GINE layers')
     parser.add_argument('--embed_dim', type=int, default=256, help='Cross-attention embedding dimension')
     parser.add_argument('--num_heads', type=int, default=8, help='Cross-attention heads')
+    parser.add_argument('--dropout', type=float, default=0.3,
+                        help='Dropout used by the global projections and FusionHead MLP')
+    parser.add_argument('--use_agg', type=str_to_bool, default=True,
+                        help='Whether to apply bottom-up atom-to-motif aggregation (true/false)')
     parser.add_argument('--epochs', type=int, default=500, help='Max training epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Peak learning rate')
@@ -193,11 +210,12 @@ def main():
     print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
     print(
         f'Interaction type: {args.interaction_type}, '
-        f'bottom-up atom-to-motif: always on, '
-        f'protein graph mode: {args.protein_graph_mode}'
+        f'bottom-up atom-to-motif: {"enabled" if args.use_agg else "disabled"}, '
+        f'protein encoder: full-edge GINE (10D edge features)'
     )
     print(
-        f'Encoder layers: atom={args.atom_layer}, motif={args.motif_layer}, '
+        f'Drug GNN: {args.drug_gnn_type}; encoder layers: '
+        f'atom={args.atom_layer}, motif={args.motif_layer}, '
         f'protein={args.protein_layer}'
     )
     interaction_parts = args.interaction_type.split('_')
@@ -207,19 +225,21 @@ def main():
     )
     print(
         f'Cross-attention: embed_dim={args.embed_dim}, num_heads={args.num_heads}; '
-        f'FusionHead input_dim={fusion_dim}'
+        f'FusionHead input_dim={fusion_dim}, dropout={args.dropout}'
     )
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = DTAModel(
         interaction_type=args.interaction_type,
         graph_pool_type=args.graph_pool_type,
-        protein_graph_mode=args.protein_graph_mode,
         atom_num_layers=args.atom_layer,
         motif_num_layers=args.motif_layer,
+        drug_gnn_type=args.drug_gnn_type,
         protein_num_layers=args.protein_layer,
         embed_dim=args.embed_dim,
         num_heads=args.num_heads,
+        dropout=args.dropout,
+        use_agg=args.use_agg,
     ).to(device)
     print('Parameter counts:', model.count_parameters())
 
