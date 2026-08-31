@@ -1,5 +1,5 @@
 #!/bin/bash
-# Davis warm-split evaluation with post-GNN atom-to-motif exchange.
+# Davis warm-split evaluation without inter-layer atom-to-motif fusion.
 for seed in 32 33 41
 do
   python train.py \
@@ -11,6 +11,7 @@ do
     --drug_gnn_type gat \
     --drug_layer 2 \
     --protein_layer 2 \
-    --run_name dta_up_gat_h256 \
+    --use_agg false \
+    --run_name layer_wise_noagg \
     "$@"
 done

@@ -1,4 +1,3 @@
 from .cross_attention import AttentionBranch
-from .encoder import DrugGraphEncoder, ProteinGraphEncoder
+from .encoder import AtomMotifFusion, DrugGraphEncoder, ProteinGraphEncoder
 from .dta_model import DTAModel, FusionHead
-from .interaction import CrossLevelExchange

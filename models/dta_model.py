@@ -7,8 +7,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from .cross_attention import AttentionBranch
-from .encoder import DrugGraphEncoder, ProteinGraphEncoder
-from .interaction import CrossLevelExchange
+from .encoder import AtomMotifFusion, DrugGraphEncoder, ProteinGraphEncoder
 
 
 VALID_INTERACTION_TYPES = (
@@ -137,10 +136,9 @@ class FusionHead(nn.Module):
         if "global" in self.components:
             fp_repr = self.fp_proj(fingerprint)
             esm_repr = self.esm_global_proj(esm_global)
-            global_repr = self.global_encoder(
-                torch.cat([fp_repr, esm_repr], dim=-1)
+            fusion_inputs.append(
+                self.global_encoder(torch.cat([fp_repr, esm_repr], dim=-1))
             )
-            fusion_inputs.append(global_repr)
 
         return self.mlp(torch.cat(fusion_inputs, dim=-1))
 
@@ -176,11 +174,19 @@ class DTAModel(nn.Module):
             raise ValueError(
                 "hidden_dim must be positive and divisible by num_heads"
             )
+        if drug_num_layers < 1:
+            raise ValueError("drug_num_layers must be positive")
         self.interaction_type = interaction_type
         self.components = interaction_components(interaction_type)
         self.use_atom = "atom" in self.components
         self.use_motif = "motif" in self.components
-        self.use_agg = use_agg and self.use_atom and self.use_motif
+        self.use_agg = (
+            use_agg
+            and self.use_atom
+            and self.use_motif
+            and drug_num_layers > 1
+        )
+        self.drug_num_layers = drug_num_layers
 
         # ── drug encoder(s) ──────────────────────────────────────────
         self.atom_encoder = None
@@ -188,10 +194,7 @@ class DTAModel(nn.Module):
             self.atom_encoder = DrugGraphEncoder(
                 in_dim=atom_in_dim,
                 edge_dim=atom_edge_dim,
-                hidden_dim=hidden_dim,
                 num_layers=drug_num_layers,
-                input_dropout=dropout,
-                build_graph_head=False,
                 gnn_type=drug_gnn_type,
                 node_key="atom",
                 edge_key=("atom", "bond", "atom"),
@@ -202,17 +205,14 @@ class DTAModel(nn.Module):
             self.motif_encoder = DrugGraphEncoder(
                 in_dim=motif_in_dim,
                 edge_dim=motif_edge_dim,
-                hidden_dim=hidden_dim,
                 num_layers=drug_num_layers,
-                input_dropout=dropout,
-                build_graph_head=False,
                 gnn_type=drug_gnn_type,
                 node_key="motif",
                 edge_key=("motif", "connects", "motif"),
             )
-        self.exchange = None
+        self.atom_motif_fusion = None
         if self.use_agg:
-            self.exchange = CrossLevelExchange(
+            self.atom_motif_fusion = AtomMotifFusion(
                 atom_dim=self.atom_encoder.node_out_dim,
                 motif_dim=self.motif_encoder.node_out_dim,
             )
@@ -222,13 +222,12 @@ class DTAModel(nn.Module):
             protein_in_dim=protein_in_dim,
             hidden_dim=hidden_dim,
             num_layers=protein_num_layers,
-            input_dropout=dropout,
             protein_edge_dim=10,
-            build_graph_head=False,
         )
         self.atom_attention = None
         if self.use_atom:
             self.atom_attention = AttentionBranch(
+                drug_dim=self.atom_encoder.node_out_dim,
                 hidden_dim=hidden_dim,
                 num_heads=num_heads,
                 dropout=dropout,
@@ -236,12 +235,13 @@ class DTAModel(nn.Module):
         self.motif_attention = None
         if self.use_motif:
             self.motif_attention = AttentionBranch(
+                drug_dim=self.motif_encoder.node_out_dim,
                 hidden_dim=hidden_dim,
                 num_heads=num_heads,
                 dropout=dropout,
             )
 
-        # ── Separate atom/motif interactions + 256-D global pair head ─────
+        # ── Atom/motif interactions + global drug/protein fusion ─────
         self.fusion_head = FusionHead(
             interaction_dim=hidden_dim,
             fp_dim=fp_dim,
@@ -253,21 +253,31 @@ class DTAModel(nn.Module):
             interaction_type=interaction_type,
         )
 
+    def _encode_drug_nodes(self, hetero):
+        atom_h = hetero["atom"].x if self.use_atom else None
+        motif_h = hetero["motif"].x if self.use_motif else None
+
+        for layer_idx in range(self.drug_num_layers):
+            if self.atom_encoder is not None:
+                atom_h = self.atom_encoder.encode_layer(
+                    hetero, atom_h, layer_idx
+                )
+            if self.motif_encoder is not None:
+                motif_h = self.motif_encoder.encode_layer(
+                    hetero, motif_h, layer_idx
+                )
+
+            if self.atom_motif_fusion is not None and layer_idx < self.drug_num_layers - 1:
+                motif_h = self.atom_motif_fusion(
+                    atom_h,
+                    motif_h,
+                    hetero["atom", "in", "motif"].edge_index,
+                )
+
+        return atom_h, motif_h
+
     def forward(self, data, return_attention: bool = False):
-        atom_h = None
-        motif_h = None
-        if self.use_atom:
-            atom_h = self.atom_encoder.encode_nodes(data.hetero)
-        if self.use_motif:
-            motif_h = self.motif_encoder.encode_nodes(data.hetero)
-        if self.exchange is not None:
-            atom_h, motif_h = self.exchange(
-                atom_h=atom_h,
-                motif_h=motif_h,
-                membership_edge_index=data.hetero[
-                    "atom", "in", "motif"
-                ].edge_index,
-            )
+        atom_h, motif_h = self._encode_drug_nodes(data.hetero)
 
         atom_repr = None
         motif_repr = None
@@ -332,11 +342,11 @@ class DTAModel(nn.Module):
         print("── motif_encoder ──")
         if self.motif_encoder is not None:
             print(self.motif_encoder)
-        print("── exchange ──")
-        if self.exchange is None:
-            print("Disabled (use_agg=False)")
+        print("── inter-layer atom-to-motif fusion ──")
+        if self.atom_motif_fusion is None:
+            print("Disabled")
         else:
-            print(self.exchange)
+            print(self.atom_motif_fusion)
         print("── protein_encoder ──")
         print(self.protein_encoder)
         print("── atom_attention ──")

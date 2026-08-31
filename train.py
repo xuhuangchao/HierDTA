@@ -44,19 +44,24 @@ def parse_args():
     parser.add_argument('--cache_dir', type=str, default='data/cache', help='Global cache directory')
     parser.add_argument('--split_root', type=str, default='data', help='Split csv root')
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
-    parser.add_argument('--interaction_type', type=str, default='all',choices=('all', 'woatom', 'womotif', 'woglobal'))
+    parser.add_argument(
+        '--interaction_type',
+        type=str,
+        default='all',
+        choices=('all', 'woatom', 'womotif', 'woglobal'),
+    )
     parser.add_argument('--drug_gnn_type', type=str, default='gat', choices=['gat', 'gin', 'gcn'],
                         help='GNN backend shared by atom and motif drug encoders')
     parser.add_argument('--drug_layer', type=int, default=2,
                         help='Number of GNN layers shared by atom and motif encoders')
     parser.add_argument('--protein_layer', type=int, default=2, help='Number of protein GIN/GINE layers')
     parser.add_argument('--hidden_dim', type=int, default=256,
-                        help='Shared atom, motif, protein, and cross-attention dimension')
+                        help='Protein and cross-attention hidden dimension')
     parser.add_argument('--num_heads', type=int, default=8, help='Cross-attention heads')
     parser.add_argument('--dropout', type=float, default=0.2,
                         help='Dropout used by input projections, attention, and fusion')
     parser.add_argument('--use_agg', type=str_to_bool, default=True,
-                        help='Whether to apply post-GNN atom-to-motif exchange (true/false)')
+                        help='Whether to apply inter-layer atom-to-motif fusion (true/false)')
     parser.add_argument('--epochs', type=int, default=500, help='Max training epochs')
     parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Peak learning rate')
@@ -65,7 +70,12 @@ def parse_args():
                         help='Minimum validation MSE improvement')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader workers')
     parser.add_argument('--log_interval', type=int, default=20, help='Training log interval')
-    parser.add_argument('--run_name', type=str, default='dta_up_gat_h256', help='Output filename suffix')
+    parser.add_argument(
+        '--run_name',
+        type=str,
+        default='dta_up_direct_gat_h256',
+        help='Output filename suffix',
+    )
 
     return parser.parse_args()
 
@@ -187,11 +197,16 @@ def main():
         f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}, '
         f'patience: {args.patience}, min_delta: {args.min_delta}'
     )
-    use_agg = args.use_agg and args.interaction_type in {'all', 'woglobal'}
+    use_agg = (
+        args.use_agg
+        and args.interaction_type in {'all', 'woglobal'}
+        and args.drug_layer > 1
+    )
     print(
         f'Interaction type: {args.interaction_type}, '
-        f'post-GNN atom-to-motif exchange: '
-        f'{"enabled" if use_agg else "disabled"}, '
+        f'inter-layer atom-to-motif fusion: '
+        f'{"enabled" if use_agg else "disabled"} '
+        f'({max(args.drug_layer - 1, 0)} stage(s)), '
         f'protein encoder: full-edge GINE (10D edge features)'
     )
     print(
@@ -199,7 +214,8 @@ def main():
         f'drug={args.drug_layer}, protein={args.protein_layer}'
     )
     print(
-        f'Hidden dimension: {args.hidden_dim}; cross-attention heads: '
+        f'Drug node dimensions: atom=74, motif=100; '
+        f'protein/attention dimension: {args.hidden_dim}; heads: '
         f'{args.num_heads}; '
         f'dropout={args.dropout}'
     )

@@ -115,8 +115,7 @@ class TestbedDatasetHMol(Dataset):
             hetero['atom', 'bond', 'atom'].edge_attr = torch.FloatTensor(hg['aa_edge_attr'])
 
             hetero['atom', 'in', 'motif'].edge_index = torch.LongTensor(hg['am_edge_index'])
-            # Kept for backward compatibility with existing caches. The
-            # independent dual-graph encoder does not consume atom-motif edges.
+            # Retained with the membership edges for atom-to-motif fusion.
             hetero['atom', 'in', 'motif'].edge_attr = torch.FloatTensor(hg['am_edge_attr'])
 
             hetero['motif', 'connects', 'motif'].edge_index = torch.LongTensor(hg['mm_edge_index'])

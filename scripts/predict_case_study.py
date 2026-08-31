@@ -34,7 +34,10 @@ def parse_args():
     parser.add_argument("--dataset", default="kiba")
     parser.add_argument(
         "--checkpoint",
-        default="results_kiba/warm/seed_41/ckpt_dta_up_gat_h256_best.pt",
+        default=(
+            "results_kiba/warm/seed_41/"
+            "ckpt_dta_up_direct_gat_h256_best.pt"
+        ),
     )
     parser.add_argument(
         "--protein_cache", default="data/cache/kiba_protein_graphs.pt"
