@@ -1,11 +1,59 @@
 import os
+from typing import Any, List
+
 import numpy as np
 from math import sqrt
 from scipy import stats
 from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader
 from torch_geometric import data as DATA
+from torch_geometric.data import Batch, Data, HeteroData
 import torch
+
+
+class DTABatch:
+    """Container for drug graphs, protein graphs, globals, and labels."""
+
+    __slots__ = (
+        "hetero",
+        "protein_graph",
+        "fingerprint",
+        "esm_global",
+        "y",
+        "smiles",
+        "key",
+    )
+
+    def __init__(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    def to(self, device: torch.device) -> "DTABatch":
+        for attr in self.__slots__:
+            value = getattr(self, attr, None)
+            if isinstance(value, (torch.Tensor, Data, HeteroData, Batch)):
+                setattr(self, attr, value.to(device))
+        return self
+
+    def __repr__(self) -> str:
+        batch_size = self.y.size(0) if self.y is not None else "?"
+        return f"DTABatch(B={batch_size})"
+
+
+def dta_collate_fn(data_list: List[Any]) -> DTABatch:
+    """Batch nested heterogeneous drug graphs and protein residue graphs."""
+
+    return DTABatch(
+        hetero=Batch.from_data_list([data.hetero for data in data_list]),
+        protein_graph=Batch.from_data_list(
+            [data.protein_graph for data in data_list]
+        ),
+        fingerprint=torch.cat([data.fingerprint for data in data_list], dim=0),
+        esm_global=torch.cat([data.esm_global for data in data_list], dim=0),
+        y=torch.cat([data.y for data in data_list], dim=0),
+        smiles=[getattr(data, "smiles", "") for data in data_list],
+        key=[getattr(data, "key", "") for data in data_list],
+    )
 
 
 def load_global_features(dataset_name, cache_dir='data/cache'):

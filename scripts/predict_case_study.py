@@ -20,9 +20,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import DTAModel
-from models.dta_model import dta_collate_fn
 from preprocessing.create_drug_data import build_fingerprint, build_mol_hetero_dict
-from utils import TestbedDatasetHMol
+from utils import TestbedDatasetHMol, dta_collate_fn
 
 
 def parse_args():
@@ -35,7 +34,7 @@ def parse_args():
     parser.add_argument("--dataset", default="kiba")
     parser.add_argument(
         "--checkpoint",
-        default="results_kiba/warm/seed_41/ckpt_pool_dual_best.pt",
+        default="results_kiba/warm/seed_41/ckpt_dta_up_gat_h256_best.pt",
     )
     parser.add_argument(
         "--protein_cache", default="data/cache/kiba_protein_graphs.pt"
@@ -153,16 +152,13 @@ def main():
         shuffle=False,
         num_workers=args.num_workers,
         collate_fn=dta_collate_fn,
-        pin_memory=torch.cuda.is_available(),
     )
 
     device = torch.device(
         f"cuda:{args.gpu_idx}" if torch.cuda.is_available() else "cpu"
     )
     print(f"Device: {device}")
-    model = DTAModel(
-        drug_graph_type="dual",
-    ).to(device)
+    model = DTAModel().to(device)
     state_dict = torch.load(args.checkpoint, map_location=device, weights_only=True)
     model.load_state_dict(state_dict, strict=True)
     print(f"Loaded checkpoint: {args.checkpoint}")

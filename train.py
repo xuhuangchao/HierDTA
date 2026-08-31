@@ -10,16 +10,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from models import DTAModel
-from models.dta_model import VALID_INTERACTION_TYPES, dta_collate_fn
-from utils import (
-    TestbedDatasetHMol,
-    ci_gpu,
-    get_rm2_gpu,
-    load_global_features,
-    mse_gpu,
-    pearson_gpu,
-    rmse_gpu,
-)
+from utils import TestbedDatasetHMol, dta_collate_fn, load_global_features, ci_gpu, get_rm2_gpu,mse_gpu,pearson_gpu,rmse_gpu
 
 
 METRIC_NAMES = ['rmse', 'mse', 'pearson', 'ci', 'rm2']
@@ -53,34 +44,28 @@ def parse_args():
     parser.add_argument('--cache_dir', type=str, default='data/cache', help='Global cache directory')
     parser.add_argument('--split_root', type=str, default='data', help='Split csv root')
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
-    parser.add_argument(
-        '--interaction_type',
-        type=str,
-        default='atom_motif_global',
-        choices=VALID_INTERACTION_TYPES,
-        help='Select any non-empty atom, motif, and global interaction combination',
-    )
-    parser.add_argument('--graph_pool_type', type=str, default='mean_add_max',
-                        choices=['mean', 'add', 'max', 'mean_add', 'mean_max', 'add_max', 'mean_add_max'],
-                        help='Legacy graph-readout pooling option; inactive in the current token-interaction path')
+    parser.add_argument('--interaction_type', type=str, default='all',choices=('all', 'woatom', 'womotif', 'woglobal'))
     parser.add_argument('--drug_gnn_type', type=str, default='gat', choices=['gat', 'gin', 'gcn'],
                         help='GNN backend shared by atom and motif drug encoders')
-    parser.add_argument('--atom_layer', type=int, default=1, help='Number of atom GNN layers')
-    parser.add_argument('--motif_layer', type=int, default=1, help='Number of motif GNN layers')
-    parser.add_argument('--protein_layer', type=int, default=1, help='Number of protein GIN/GINE layers')
-    parser.add_argument('--embed_dim', type=int, default=256, help='Cross-attention embedding dimension')
+    parser.add_argument('--drug_layer', type=int, default=2,
+                        help='Number of GNN layers shared by atom and motif encoders')
+    parser.add_argument('--protein_layer', type=int, default=2, help='Number of protein GIN/GINE layers')
+    parser.add_argument('--hidden_dim', type=int, default=256,
+                        help='Shared atom, motif, protein, and cross-attention dimension')
     parser.add_argument('--num_heads', type=int, default=8, help='Cross-attention heads')
-    parser.add_argument('--dropout', type=float, default=0.3,
-                        help='Dropout used by the global projections and FusionHead MLP')
+    parser.add_argument('--dropout', type=float, default=0.2,
+                        help='Dropout used by input projections, attention, and fusion')
     parser.add_argument('--use_agg', type=str_to_bool, default=True,
-                        help='Whether to apply bottom-up atom-to-motif aggregation (true/false)')
+                        help='Whether to apply post-GNN atom-to-motif exchange (true/false)')
     parser.add_argument('--epochs', type=int, default=500, help='Max training epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4, help='Peak learning rate')
     parser.add_argument('--patience', type=int, default=30, help='Early stopping patience')
-    parser.add_argument('--num_workers', type=int, default=4, help='DataLoader workers')
+    parser.add_argument('--min_delta', type=float, default=1e-4,
+                        help='Minimum validation MSE improvement')
+    parser.add_argument('--num_workers', type=int, default=0, help='DataLoader workers')
     parser.add_argument('--log_interval', type=int, default=20, help='Training log interval')
-    parser.add_argument('--run_name', type=str, default='cross_attention_pool', help='Output filename suffix')
+    parser.add_argument('--run_name', type=str, default='dta_up_gat_h256', help='Output filename suffix')
 
     return parser.parse_args()
 
@@ -116,17 +101,6 @@ def build_dataset(args, dataset, split, drug_features, protein_features):
         cache_dir=args.cache_dir,
         drug_features=drug_features,
         protein_features=protein_features,
-    )
-
-
-def build_loader(data, args, shuffle=False):
-    return DataLoader(
-        data,
-        batch_size=args.batch_size,
-        shuffle=shuffle,
-        num_workers=args.num_workers,
-        collate_fn=dta_collate_fn,
-        pin_memory=torch.cuda.is_available(),
     )
 
 
@@ -190,6 +164,8 @@ def predict(model, device, loader):
 
 def main():
     args = parse_args()
+    if args.min_delta < 0:
+        raise ValueError('min_delta must be non-negative')
     datasets = ['davis', 'kiba']
     if args.dataset is not None:
         dataset = args.dataset
@@ -207,36 +183,34 @@ def main():
     print(f'Dataset: {dataset}')
     print(f'Strategy: {args.strategy}, seed: {args.seed}')
     print(f'Device: {device}')
-    print(f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}')
+    print(
+        f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}, '
+        f'patience: {args.patience}, min_delta: {args.min_delta}'
+    )
+    use_agg = args.use_agg and args.interaction_type in {'all', 'woglobal'}
     print(
         f'Interaction type: {args.interaction_type}, '
-        f'bottom-up atom-to-motif: {"enabled" if args.use_agg else "disabled"}, '
+        f'post-GNN atom-to-motif exchange: '
+        f'{"enabled" if use_agg else "disabled"}, '
         f'protein encoder: full-edge GINE (10D edge features)'
     )
     print(
         f'Drug GNN: {args.drug_gnn_type}; encoder layers: '
-        f'atom={args.atom_layer}, motif={args.motif_layer}, '
-        f'protein={args.protein_layer}'
-    )
-    interaction_parts = args.interaction_type.split('_')
-    fusion_dim = sum(
-        256 if part == 'global' else args.embed_dim
-        for part in interaction_parts
+        f'drug={args.drug_layer}, protein={args.protein_layer}'
     )
     print(
-        f'Cross-attention: embed_dim={args.embed_dim}, num_heads={args.num_heads}; '
-        f'FusionHead input_dim={fusion_dim}, dropout={args.dropout}'
+        f'Hidden dimension: {args.hidden_dim}; cross-attention heads: '
+        f'{args.num_heads}; '
+        f'dropout={args.dropout}'
     )
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = DTAModel(
         interaction_type=args.interaction_type,
-        graph_pool_type=args.graph_pool_type,
-        atom_num_layers=args.atom_layer,
-        motif_num_layers=args.motif_layer,
+        drug_num_layers=args.drug_layer,
         drug_gnn_type=args.drug_gnn_type,
         protein_num_layers=args.protein_layer,
-        embed_dim=args.embed_dim,
+        hidden_dim=args.hidden_dim,
         num_heads=args.num_heads,
         dropout=args.dropout,
         use_agg=args.use_agg,
@@ -248,19 +222,24 @@ def main():
     val_data = build_dataset(args, dataset, 'valid', drug_features, protein_features)
     test_data = build_dataset(args, dataset, 'test', drug_features, protein_features)
 
-    train_loader = build_loader(train_data, args, shuffle=True)
-    val_loader = build_loader(val_data, args, shuffle=False)
-    test_loader = build_loader(test_data, args, shuffle=False)
+    loader_kwargs = {
+        'batch_size': args.batch_size,
+        'num_workers': args.num_workers,
+        'collate_fn': dta_collate_fn,
+    }
+    train_loader = DataLoader(train_data, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_data, shuffle=False, **loader_kwargs)
+    test_loader = DataLoader(test_data, shuffle=False, **loader_kwargs)
 
     loss_fn = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     result_path = os.path.join(output_dir, f'result_{args.run_name}.csv')
+    checkpoint_path = os.path.join(output_dir, f'ckpt_{args.run_name}_best.pt')
 
     best_mse = float('inf')
     best_epoch = 0
     best_metrics = None
-    best_checkpoint_path = None
 
     for epoch in range(1, args.epochs + 1):
         avg_loss = train_one_epoch(
@@ -268,28 +247,30 @@ def main():
             args.log_interval
         )
         y_val, pred_val = predict(model, device, val_loader)
-        val_metrics = compute_metrics_gpu(y_val, pred_val)
+        val_mse = mse_gpu(y_val, pred_val).item()
 
         print(
             f'Epoch {epoch}: train_loss={avg_loss:.6f}, '
-            f'val_rmse={val_metrics[0]:.6f}, val_mse={val_metrics[1]:.6f}, '
-            f'val_pearson={val_metrics[2]:.6f}, val_ci={val_metrics[3]:.6f}, '
+            f'val_mse={val_mse:.6f}, '
             f'lr={optimizer.param_groups[0]["lr"]:.2e}'
         )
 
-        if val_metrics[1] < best_mse:
+        if val_mse < best_mse - args.min_delta:
             y_test, pred_test = predict(model, device, test_loader)
             test_metrics = compute_metrics_gpu(y_test, pred_test)
-
-            checkpoint_path = os.path.join(output_dir, f'ckpt_{args.run_name}_best.pt')
             torch.save(model.state_dict(), checkpoint_path)
-            pd.DataFrame([dict(zip(METRIC_NAMES, test_metrics))]).to_csv(result_path, index=False)
+            pd.DataFrame([dict(zip(METRIC_NAMES, test_metrics))]).to_csv(
+                result_path,
+                index=False,
+            )
 
-            best_mse = val_metrics[1]
+            best_mse = val_mse
             best_epoch = epoch
             best_metrics = test_metrics
-            best_checkpoint_path = checkpoint_path
-            print(f'Val MSE improved at epoch {epoch}. Saved checkpoint to {checkpoint_path}')
+            print(
+                f'Val MSE improved at epoch {epoch}. '
+                f'Saved checkpoint to {checkpoint_path}'
+            )
             print('Test metrics:', dict(zip(METRIC_NAMES, test_metrics)))
         else:
             print(f'No improvement. Best epoch: {best_epoch}, best val MSE: {best_mse:.6f}')
@@ -301,9 +282,9 @@ def main():
     if best_metrics is None:
         print('Training finished without a saved best checkpoint.')
     else:
-        print(f'Best epoch: {best_epoch}')
+        print(f'Best epoch: {best_epoch}, best val MSE: {best_mse:.6f}')
         print('Best test metrics:', dict(zip(METRIC_NAMES, best_metrics)))
-        print(f'Saved best model to {best_checkpoint_path}')
+        print(f'Saved best model to {checkpoint_path}')
 
 if __name__ == '__main__':
     main()

@@ -1,11 +1,11 @@
 #!/bin/bash
-# Davis unseen-pair evaluation with post-GNN atom-to-motif exchange.
-for seed in 41 42 43 32 33
+# Davis warm-split evaluation with post-GNN atom-to-motif exchange.
+for seed in 32 33 41
 do
   python train.py \
     --dataset davis \
     --gpu_idx 0 \
-    --strategy unseen_pair \
+    --strategy warm \
     --seed "${seed}" \
     --interaction_type all \
     --drug_gnn_type gat \

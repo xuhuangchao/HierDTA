@@ -1,6 +1,5 @@
 #!/bin/bash
-# Davis unseen-protein evaluation for the dual drug encoder with explicit
-# bottom-up atom-to-motif message passing. Runs all five predefined split seeds.
+# Davis unseen-protein evaluation with post-GNN atom-to-motif exchange.
 for seed in 41 42 43 32 33
 do
   python train.py \
@@ -8,13 +7,10 @@ do
     --gpu_idx 1 \
     --strategy unseen_prot \
     --seed "${seed}" \
-    --interaction_type atom_motif_global \
+    --interaction_type all \
     --drug_gnn_type gat \
-    --atom_layer 2 \
-    --motif_layer 1 \
+    --drug_layer 2 \
     --protein_layer 2 \
-    --embed_dim 256 \
-    --num_heads 8 \
-    --run_name dta_0822 \
+    --run_name dta_up_gat_h256 \
     "$@"
 done

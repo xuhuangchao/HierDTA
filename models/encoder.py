@@ -12,18 +12,20 @@ from torch_geometric.nn import (
     global_mean_pool,
 )
 
+_DEFAULT_POOL_TYPE = "mean_add_max"
 
-class AtomGNN(nn.Module):
+
+class DrugGraphEncoder(nn.Module):
     """Reusable homogeneous graph branch over one node/edge type in a HeteroData."""
 
     def __init__(
         self,
         in_dim=37,
         edge_dim=13,
+        hidden_dim=256,
         num_layers=1,
         heads=2,
-        gat_dropout=0.0,
-        graph_pool_type="mean_add_max",
+        input_dropout=0.1,
         graph_out_dim=1024,
         post_dropout=0.3,
         build_graph_head=True,
@@ -32,47 +34,44 @@ class AtomGNN(nn.Module):
         edge_key=("atom", "bond", "atom"),
     ):
         super().__init__()
-        if num_layers < 1:
-            raise ValueError("AtomGNN requires num_layers >= 1")
-        if gnn_type not in {"gat", "gin", "gcn"}:
-            raise ValueError("gnn_type must be 'gat', 'gin', or 'gcn'")
-        self.in_dim = in_dim
-        self.heads = heads
+        self.hidden_dim = hidden_dim
         self.gnn_type = gnn_type
         self.node_key = node_key
         self.edge_key = edge_key
-        self.graph_pool_type = graph_pool_type
 
+        self.input_proj = nn.Sequential(
+            nn.Linear(in_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(input_dropout),
+        )
         self.convs = nn.ModuleList()
-        layer_in = in_dim
-        node_out_dim = in_dim * heads
+        layer_in = hidden_dim
         for _ in range(num_layers):
             if gnn_type == "gat":
                 conv = GATv2Conv(
                     layer_in,
-                    in_dim,
+                    hidden_dim // heads,
                     heads=heads,
                     concat=True,
                     edge_dim=edge_dim,
-                    dropout=gat_dropout,
                 )
             elif gnn_type == "gin":
                 update_mlp = nn.Sequential(
-                    nn.Linear(layer_in, node_out_dim),
+                    nn.Linear(layer_in, hidden_dim),
                     nn.ReLU(),
-                    nn.Linear(node_out_dim, node_out_dim),
+                    nn.Linear(hidden_dim, hidden_dim),
                 )
                 conv = GINConv(update_mlp)
             else:
-                conv = GCNConv(layer_in, node_out_dim)
+                conv = GCNConv(layer_in, hidden_dim)
             self.convs.append(conv)
-            layer_in = node_out_dim
+            layer_in = hidden_dim
         self.activation = nn.ReLU()
 
         self.graph_proj = None
         if build_graph_head:
-            conv_out_dim = in_dim * heads
-            pooled_dim = self._pooled_dim(conv_out_dim, graph_pool_type)
+            pooled_dim = self._pooled_dim(hidden_dim, _DEFAULT_POOL_TYPE)
             self.graph_proj = nn.Sequential(
                 nn.Linear(pooled_dim, graph_out_dim),
                 nn.ReLU(),
@@ -95,21 +94,21 @@ class AtomGNN(nn.Module):
             elif pool_name == "max":
                 pooled.append(global_max_pool(x, batch))
             else:
-                raise ValueError(f"Unsupported graph_pool_type component: {pool_name}")
+                raise ValueError(f"Unsupported pool_type component: {pool_name}")
         return pooled[0] if len(pooled) == 1 else torch.cat(pooled, dim=-1)
 
     @property
     def node_out_dim(self):
-        """Width of the node embeddings produced by the final GATv2 layer."""
-        return self.in_dim * self.heads
+        """Width of the node embeddings produced by the final GNN layer."""
+        return self.hidden_dim
 
     def encode_nodes(self, data, x_override=None):
         """Encode nodes without graph-level pooling.
 
-        ``x_override`` allows the motif branch to consume node features updated
-        by an explicit atom-to-motif message-passing module.
+        ``x_override`` can replace the raw node features before projection.
         """
         x = data[self.node_key].x if x_override is None else x_override
+        x = self.input_proj(x)
         edge_index = data[self.edge_key].edge_index
         edge_attr = data[self.edge_key].edge_attr
         for conv in self.convs:
@@ -120,11 +119,11 @@ class AtomGNN(nn.Module):
             x = self.activation(x)
         return x
 
-    def readout(self, node_h, batch):
+    def readout(self, node_h, batch, pool_type=_DEFAULT_POOL_TYPE):
         """Pool node embeddings and project them to a graph representation."""
         if self.graph_proj is None:
             raise RuntimeError("Graph readout was disabled with build_graph_head=False")
-        return self.graph_proj(self._pool(node_h, batch, self.graph_pool_type))
+        return self.graph_proj(self._pool(node_h, batch, pool_type))
 
     def forward(self, data, x_override=None):
         node_h = self.encode_nodes(data, x_override=x_override)
@@ -138,26 +137,26 @@ class ProteinGraphEncoder(nn.Module):
         self,
         protein_in_dim=41,
         hidden_dim=256,
-        num_layers=1,
-        graph_pool_type="mean_add_max",
+        num_layers=2,
+        input_dropout=0.1,
         graph_out_dim=1024,
         post_dropout=0.3,
         protein_edge_dim=10,
         build_graph_head=True,
     ):
         super().__init__()
-        if num_layers < 1:
-            raise ValueError("ProteinGraphEncoder requires num_layers >= 1")
-        if protein_edge_dim < 1:
-            raise ValueError("protein_edge_dim must be positive")
 
-        self.graph_pool_type = graph_pool_type
         self.protein_edge_dim = protein_edge_dim
+        self.input_proj = nn.Sequential(
+            nn.Linear(protein_in_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(input_dropout),
+        )
         self.convs = nn.ModuleList()
-        for layer_idx in range(num_layers):
-            in_dim = protein_in_dim if layer_idx == 0 else hidden_dim
+        for _ in range(num_layers):
             update_mlp = nn.Sequential(
-                nn.Linear(in_dim, hidden_dim),
+                nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
             )
@@ -170,7 +169,7 @@ class ProteinGraphEncoder(nn.Module):
         if build_graph_head:
             self.graph_proj = nn.Sequential(
                 nn.Linear(
-                    AtomGNN._pooled_dim(hidden_dim, graph_pool_type),
+                    DrugGraphEncoder._pooled_dim(hidden_dim, _DEFAULT_POOL_TYPE),
                     graph_out_dim,
                 ),
                 nn.BatchNorm1d(graph_out_dim),
@@ -180,16 +179,17 @@ class ProteinGraphEncoder(nn.Module):
 
     def encode_nodes(self, x, edge_index, edge_attr=None):
         """Return residue embeddings after full-edge GINE message passing."""
+        x = self.input_proj(x)
         for conv in self.convs:
             x = conv(x, edge_index, edge_attr=edge_attr)
             x = self.activation(x)
         return x
 
-    def readout(self, node_h, batch):
+    def readout(self, node_h, batch, pool_type=_DEFAULT_POOL_TYPE):
         """Pool residue embeddings and project them to a graph representation."""
         if self.graph_proj is None:
             raise RuntimeError("Graph readout was disabled with build_graph_head=False")
-        pooled = AtomGNN._pool(node_h, batch, self.graph_pool_type)
+        pooled = DrugGraphEncoder._pool(node_h, batch, pool_type)
         return self.graph_proj(pooled)
 
     def forward(self, x, edge_index, batch, edge_attr=None):
