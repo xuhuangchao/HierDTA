@@ -55,6 +55,8 @@ lightning_logs/
 
 # Generated molecular/protein preprocessing artifacts
 data/
+scripts/
+scripts2/
 
 # Temporary data and backups
 backup_code/

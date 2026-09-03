@@ -2,38 +2,12 @@
 
 import torch
 import torch.nn as nn
-from torch_scatter import scatter_mean
 from torch_geometric.nn import (
     GATv2Conv,
     GCNConv,
     GINConv,
     GINEConv,
 )
-
-
-class AtomMotifFusion(nn.Module):
-    """Inject mean-pooled member-atom context through a gated residual."""
-
-    def __init__(self, atom_dim=74, motif_dim=100):
-        super().__init__()
-        self.atom_proj = nn.Linear(atom_dim, motif_dim)
-        self.gate = nn.Linear(motif_dim * 2, motif_dim)
-        nn.init.zeros_(self.gate.weight)
-        nn.init.constant_(self.gate.bias, -2.0)
-
-    def forward(self, atom_h, motif_h, membership_edge_index):
-        atom_index, motif_index = membership_edge_index
-        atom_message = scatter_mean(
-            atom_h[atom_index],
-            motif_index,
-            dim=0,
-            dim_size=motif_h.size(0),
-        )
-        atom_context = self.atom_proj(atom_message)
-        gate = torch.sigmoid(
-            self.gate(torch.cat([motif_h, atom_context], dim=-1))
-        )
-        return motif_h + gate * atom_context
 
 
 class DrugGraphEncoder(nn.Module):
@@ -58,14 +32,14 @@ class DrugGraphEncoder(nn.Module):
 
         self.convs = nn.ModuleList()
         layer_in = in_dim
-        node_out_dim = in_dim * heads
+        node_out_dim = in_dim
         for _ in range(num_layers):
             if gnn_type == "gat":
                 conv = GATv2Conv(
                     layer_in,
-                    in_dim,
+                    node_out_dim,
                     heads=heads,
-                    concat=True,
+                    concat=False,
                     edge_dim=edge_dim,
                 )
             elif gnn_type == "gin":
@@ -84,7 +58,7 @@ class DrugGraphEncoder(nn.Module):
     @property
     def node_out_dim(self):
         """Width of the node embeddings produced by the final GNN layer."""
-        return self.in_dim * self.heads
+        return self.in_dim
 
     def encode_layer(self, data, x, layer_idx):
         """Run one GNN layer so hierarchical branches can be interleaved."""

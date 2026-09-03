@@ -1,16 +1,18 @@
 #!/bin/bash
 # Davis unseen-drug evaluation with inter-layer atom-to-motif fusion.
-for seed in 41 42 43 32 33
+for seed in 32 33 41 42 43
 do
   python train.py \
     --dataset davis \
-    --gpu_idx 1 \
+    --gpu_idx 0 \
     --strategy unseen_drug \
     --seed "${seed}" \
-    --interaction_type all \
     --drug_gnn_type gat \
-    --drug_layer 2 \
-    --protein_layer 2 \
-    --run_name layer_fusion \
+    --drug_layer 3 \
+    --motif_layer 1 \
+    --protein_layer 3 \
+    --use_agg true \
+    --run_name motif2atom_mlayer1 \
     "$@"
 done
+

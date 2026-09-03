@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from models import DTAModel
+from dta_model import DTAModel
 from utils import TestbedDatasetHMol, dta_collate_fn, load_global_features, ci_gpu, get_rm2_gpu,mse_gpu,pearson_gpu,rmse_gpu
 
 
@@ -44,30 +44,24 @@ def parse_args():
     parser.add_argument('--cache_dir', type=str, default='data/cache', help='Global cache directory')
     parser.add_argument('--split_root', type=str, default='data', help='Split csv root')
     parser.add_argument('--result_root', type=str, default=None, help='Result root, default results_{dataset}')
-    parser.add_argument(
-        '--interaction_type',
-        type=str,
-        default='all',
-        choices=('all', 'woatom', 'womotif', 'woglobal'),
-    )
     parser.add_argument('--drug_gnn_type', type=str, default='gat', choices=['gat', 'gin', 'gcn'],
-                        help='GNN backend shared by atom and motif drug encoders')
+                        help='GNN backend shared by atom and motif drug encoders') # 超参数
     parser.add_argument('--drug_layer', type=int, default=2,
-                        help='Number of GNN layers shared by atom and motif encoders')
+                        help='Number of atom GNN layers')
+    parser.add_argument('--motif_layer', type=int, default=1,
+                        help='Number of motif GNN layers (1 is recommended; reused at every atom layer)')
     parser.add_argument('--protein_layer', type=int, default=2, help='Number of protein GIN/GINE layers')
-    parser.add_argument('--hidden_dim', type=int, default=256,
+    parser.add_argument('--hidden_dim', type=int, default=256, # MAYBE 96, 128, 256
                         help='Protein and cross-attention hidden dimension')
-    parser.add_argument('--num_heads', type=int, default=8, help='Cross-attention heads')
+    parser.add_argument('--num_heads', type=int, default=8, help='Cross-attention heads') # 超参数
     parser.add_argument('--dropout', type=float, default=0.2,
                         help='Dropout used by input projections, attention, and fusion')
     parser.add_argument('--use_agg', type=str_to_bool, default=True,
                         help='Whether to apply inter-layer atom-to-motif fusion (true/false)')
     parser.add_argument('--epochs', type=int, default=500, help='Max training epochs')
-    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=128, help='Batch size')  
     parser.add_argument('--lr', type=float, default=1e-4, help='Peak learning rate')
     parser.add_argument('--patience', type=int, default=30, help='Early stopping patience')
-    parser.add_argument('--min_delta', type=float, default=1e-4,
-                        help='Minimum validation MSE improvement')
     parser.add_argument('--num_workers', type=int, default=0, help='DataLoader workers')
     parser.add_argument('--log_interval', type=int, default=20, help='Training log interval')
     parser.add_argument(
@@ -174,8 +168,6 @@ def predict(model, device, loader):
 
 def main():
     args = parse_args()
-    if args.min_delta < 0:
-        raise ValueError('min_delta must be non-negative')
     datasets = ['davis', 'kiba']
     if args.dataset is not None:
         dataset = args.dataset
@@ -195,26 +187,22 @@ def main():
     print(f'Device: {device}')
     print(
         f'Batch size: {args.batch_size}, lr: {args.lr}, epochs: {args.epochs}, '
-        f'patience: {args.patience}, min_delta: {args.min_delta}'
+        f'patience: {args.patience}'
     )
-    use_agg = (
-        args.use_agg
-        and args.interaction_type in {'all', 'woglobal'}
-        and args.drug_layer > 1
-    )
+    use_agg = args.use_agg and args.drug_layer > 1
     print(
-        f'Interaction type: {args.interaction_type}, '
-        f'inter-layer atom-to-motif fusion: '
+        f'Inter-layer atom-to-motif fusion: '
         f'{"enabled" if use_agg else "disabled"} '
         f'({max(args.drug_layer - 1, 0)} stage(s)), '
         f'protein encoder: full-edge GINE (10D edge features)'
     )
     print(
         f'Drug GNN: {args.drug_gnn_type}; encoder layers: '
-        f'drug={args.drug_layer}, protein={args.protein_layer}'
+        f'atom={args.drug_layer}, motif={args.motif_layer}, protein={args.protein_layer}'
     )
     print(
-        f'Drug node dimensions: atom=74, motif=100; '
+        f'Drug node dimensions: atom={args.hidden_dim}, '
+        f'motif={args.hidden_dim}; '
         f'protein/attention dimension: {args.hidden_dim}; heads: '
         f'{args.num_heads}; '
         f'dropout={args.dropout}'
@@ -222,8 +210,8 @@ def main():
     print(f'Data split seed: {args.seed}, Run seed: 0 for reproducibility')
 
     model = DTAModel(
-        interaction_type=args.interaction_type,
         drug_num_layers=args.drug_layer,
+        motif_num_layers=args.motif_layer,
         drug_gnn_type=args.drug_gnn_type,
         protein_num_layers=args.protein_layer,
         hidden_dim=args.hidden_dim,
@@ -271,7 +259,7 @@ def main():
             f'lr={optimizer.param_groups[0]["lr"]:.2e}'
         )
 
-        if val_mse < best_mse - args.min_delta:
+        if val_mse < best_mse:
             y_test, pred_test = predict(model, device, test_loader)
             test_metrics = compute_metrics_gpu(y_test, pred_test)
             torch.save(model.state_dict(), checkpoint_path)
