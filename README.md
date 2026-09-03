@@ -9,7 +9,6 @@ cross-attend to protein-residue embeddings for affinity prediction.
 
 ![HierDTA architecture](images/Architecture.png)
 
-
 The drug atom encoder and motif encoder use the same configurable backbone
 type (`gat`, `gcn`, or `gin`) but have independent depths. The current
 experimental configuration uses three atom-GNN layers and one motif-GNN layer.
@@ -130,6 +129,6 @@ will be added after publication.
 
 ## Acknowledgements
 
-Protein-graph construction is adapted from
+Protein graph construction is adapted from
 [3d-prot-dta](https://github.com/vtarasv/3d-prot-dta), and functional-group
 decomposition is adapted from [HimGNN](https://github.com/UnHans/HimGNN).
